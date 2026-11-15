@@ -46,7 +46,9 @@ import com.starpick.app.core.parser.PlaylistParser
 import com.starpick.app.ui.component.EmptyHint
 import com.starpick.app.ui.component.SectionTitle
 import com.starpick.app.ui.component.VodCover
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun DetailScreen(
@@ -86,20 +88,24 @@ fun DetailScreen(
     }
 
     // 搜索结果里有些源不给播放串，换源或取详情时补一次。
-    // detail 是网络请求，用 runCatching 兜底：源超时/失败不能把详情页带崩。
-    LaunchedEffect(selected) {
-        var base = selected
-        if (base.playUrl.isBlank()) {
-            val site = sources.firstOrNull { it.id == base.sourceId }
-            if (site != null) {
-                base = runCatching { container.api.detail(site, base.vodId) }
-                    .getOrNull() ?: base
+    // 关键：依赖 sources 一起作为 key，等 sources 收集到之后才补详情，避免拿空列表直接放弃；
+    // 网络请求切 IO 线程，整体 try-catch 兜底，任何异常都不能把详情页带崩。
+    LaunchedEffect(selected, sources) {
+        runCatching {
+            var base = selected
+            if (base.playUrl.isBlank()) {
+                val site = sources.firstOrNull { it.id == base.sourceId }
+                if (site != null) {
+                    base = withContext(Dispatchers.IO) {
+                        container.api.detail(site, base.vodId)
+                    } ?: base
+                }
             }
+            resolved = base
+            lineIndex = 0
+            favorite = container.store.isFavorite(base.key)
+            resumeRecord = container.store.progressFor(base.key)
         }
-        resolved = base
-        lineIndex = 0
-        favorite = container.store.isFavorite(base.key)
-        resumeRecord = container.store.progressFor(base.key)
     }
 
     val playGroups = remember(resolved) {

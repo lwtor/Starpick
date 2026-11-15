@@ -13,4 +13,5 @@ data class DoubanSubject(
     val url: String = "",
     val playable: Boolean = false,
     val isNew: Boolean = false,
+    val episodesInfo: String = "",
 )

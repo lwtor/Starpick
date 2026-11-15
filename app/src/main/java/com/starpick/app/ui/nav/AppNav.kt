@@ -109,14 +109,17 @@ fun StarpickNav(container: AppContainer) {
                 is Screen.Settings -> "设置"
             }
             Scaffold(
-                // CenterAlignedTopAppBar 自带 windowInsets 处理，状态栏不再遮挡标题。
+                // 首页（Discover）做沉浸式，不显示顶部栏，让英雄横幅顶到状态栏下；
+                // 其余 tab 用 CenterAlignedTopAppBar，自带 windowInsets 处理状态栏遮挡。
                 topBar = {
-                    CenterAlignedTopAppBar(
-                        title = { Text(title) },
-                        colors = TopAppBarDefaults.topAppBarColors(
-                            containerColor = MaterialTheme.colorScheme.background,
-                        ),
-                    )
+                    if (current != Screen.Discover) {
+                        CenterAlignedTopAppBar(
+                            title = { Text(title) },
+                            colors = TopAppBarDefaults.topAppBarColors(
+                                containerColor = MaterialTheme.colorScheme.background,
+                            ),
+                        )
+                    }
                 },
                 bottomBar = { BottomTabs(current, goTab) },
             ) { padding ->

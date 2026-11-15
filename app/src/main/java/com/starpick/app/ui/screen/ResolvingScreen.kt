@@ -116,14 +116,9 @@ fun ResolvingScreen(
                 }
 
                 is ResolveState.Done -> {
-                    // 命中后进入详情。用 remember 保证只回调一次，避免重复 push。
-                    var fired by remember(s.group.title) { mutableStateOf(false) }
-                    LaunchedEffect(s.group.title) {
-                        if (!fired) {
-                            fired = true
-                            onResolved(s.group)
-                        }
-                    }
+                    // 命中后进入详情。onResolved 只回调一次（由 LaunchedEffect 的 key 保证），
+                    // 这里只短暂渲染一个进度圈，随即被导航层替换。
+                    LaunchedEffect(Unit) { onResolved(s.group) }
                     CircularProgressIndicator()
                 }
             }

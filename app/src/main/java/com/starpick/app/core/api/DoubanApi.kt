@@ -57,6 +57,7 @@ class DoubanApi(private val client: HttpClient) {
                 url = obj.str("url"),
                 playable = obj.bool("playable"),
                 isNew = obj.bool("is_new"),
+                episodesInfo = obj.str("episodes_info"),
             )
         }
     }
