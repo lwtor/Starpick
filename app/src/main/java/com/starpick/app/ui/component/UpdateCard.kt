@@ -27,7 +27,9 @@ import com.starpick.app.AppContainer
 import com.starpick.app.BuildConfig
 import dev.veneranative.updater.InstallResult
 import dev.veneranative.updater.UpdateStatus
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 自升级入口卡片。真相源是 [AppContainer.updater.status]，
@@ -53,8 +55,11 @@ fun UpdateCard(container: AppContainer) {
             onAction = {
                 scope.launch {
                     busy = true
-                    // checkAndPrefetch 会重试下载并在成功后把 status 推到 Downloaded。
-                    container.updater.checkAndPrefetch(BuildConfig.VERSION_CODE.toLong())
+                    // checkAndPrefetch 里的 APK 下载是阻塞 IO，必须在 IO 线程执行，
+                    // 否则 25MB 下载会卡死主线程导致页面无响应。
+                    withContext(Dispatchers.IO) {
+                        container.updater.checkAndPrefetch(BuildConfig.VERSION_CODE.toLong())
+                    }
                     busy = false
                 }
             },
@@ -68,6 +73,7 @@ fun UpdateCard(container: AppContainer) {
             onAction = {
                 scope.launch {
                     busy = true
+                    // install 会弹系统安装器，属于轻量操作，主线程即可。
                     when (val r = container.updater.install(s.apkFile)) {
                         InstallResult.Launched -> message = "已交给系统安装器，请确认"
                         is InstallResult.Failure -> message = "安装失败：${r.message}"

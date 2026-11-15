@@ -32,7 +32,9 @@ import com.starpick.app.AppContainer
 import com.starpick.app.BuildConfig
 import com.starpick.app.ui.component.SectionTitle
 import dev.veneranative.updater.UpdateCheck
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 设置页：版本信息 + 手动检查更新 + 采集源管理。
@@ -129,7 +131,9 @@ private fun ManualUpdateSection(container: AppContainer) {
                         checking = true
                         scope.launch {
                             message = when (val r = try {
-                                container.updater.check(BuildConfig.VERSION_CODE.toLong())
+                                withContext(Dispatchers.IO) {
+                                    container.updater.check(BuildConfig.VERSION_CODE.toLong())
+                                }
                             } catch (e: Exception) {
                                 null
                             }) {
