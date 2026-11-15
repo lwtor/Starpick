@@ -79,12 +79,19 @@ fun PlayerScreen(
 
     // 当前线路：页内可切，初始取导航传入的 groupIndex。
     var currentGroup by remember(groupIndex) { mutableIntStateOf(groupIndex) }
+    // 当前集：页内可切。切线路时一并归零，避免新线路集数变少导致越界。
+    var currentEpisode by remember(currentGroup) { mutableIntStateOf(episodeIndex) }
+
     val episodes = remember(groups, currentGroup) {
         groups.getOrNull(currentGroup)?.episodes.orEmpty()
     }
-    val episode = episodes.getOrNull(episodeIndex)
 
-    if (episode == null || episodes.isEmpty()) {
+    // 边界保护：集数变化后若 currentEpisode 越界，回退到最后一集。
+    val safeEpisode = currentEpisode.coerceAtMost((episodes.size - 1).coerceAtLeast(0))
+    val currentUrl = episodes.getOrNull(safeEpisode)?.url
+    val currentName = episodes.getOrNull(safeEpisode)?.name
+
+    if (currentUrl.isNullOrBlank() || episodes.isEmpty()) {
         Box(
             modifier = Modifier.fillMaxSize().background(Color.Black),
             contentAlignment = Alignment.Center,
@@ -96,11 +103,6 @@ fun PlayerScreen(
         }
         return
     }
-
-    // 当前播放的集：允许在页内切集（切集即重建播放器）。
-    var currentEpisode by remember(currentGroup, episodeIndex) { mutableIntStateOf(episodeIndex) }
-    val currentUrl = episodes[currentEpisode].url
-    val currentName = episodes[currentEpisode].name
 
     val player = remember(currentUrl) {
         ExoPlayer.Builder(context).build().apply {
@@ -121,7 +123,7 @@ fun PlayerScreen(
         val saved = container.store.progressFor(item.key)
         if (saved != null &&
             saved.groupIndex == currentGroup &&
-            saved.episodeIndex == currentEpisode &&
+            saved.episodeIndex == safeEpisode &&
             saved.positionMs > 0
         ) {
             player.seekTo(saved.positionMs)
@@ -136,8 +138,8 @@ fun PlayerScreen(
                     title = item.title,
                     cover = item.cover,
                     groupIndex = currentGroup,
-                    episodeIndex = currentEpisode,
-                    episodeName = currentName,
+                    episodeIndex = safeEpisode,
+                    episodeName = currentName ?: "",
                     positionMs = lastPosition,
                     durationMs = lastDuration,
                     updatedAt = System.currentTimeMillis(),
@@ -154,8 +156,8 @@ fun PlayerScreen(
                 title = item.title,
                 cover = item.cover,
                 groupIndex = currentGroup,
-                episodeIndex = currentEpisode,
-                episodeName = currentName,
+                episodeIndex = safeEpisode,
+                episodeName = currentName ?: "",
                 positionMs = lastPosition,
                 durationMs = lastDuration,
                 updatedAt = System.currentTimeMillis(),
@@ -220,7 +222,7 @@ fun PlayerScreen(
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        text = currentName,
+                        text = currentName ?: "",
                         color = Color.White.copy(alpha = 0.7f),
                         style = MaterialTheme.typography.labelSmall,
                         maxLines = 1,
