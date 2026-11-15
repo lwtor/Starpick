@@ -1,0 +1,52 @@
+package com.starpick.app.core.model
+
+/**
+ * 用户自行配置的苹果 CMS V10 采集站。应用不内置、不预置任何源。
+ */
+data class SourceSite(
+    val id: String,
+    val name: String,
+    val baseUrl: String,
+    val enabled: Boolean = true,
+)
+
+/**
+ * 一条影视记录。字段刻意贴近 CMS 原始协议，方便后续逐源适配。
+ * 这一层是纯 Kotlin，不含任何 Android 依赖，将来可直接搬进 KMP 的 commonMain。
+ */
+data class VodItem(
+    val sourceId: String,
+    val sourceName: String,
+    val vodId: String,
+    val title: String,
+    val cover: String = "",
+    val remark: String = "",
+    val category: String = "",
+    val area: String = "",
+    val year: String = "",
+    val description: String = "",
+    val playFrom: String = "",
+    val playUrl: String = "",
+) {
+    /** 收藏与观看进度使用的稳定标识；同一部剧来自不同源时各自独立记录。 */
+    val key: String get() = "$sourceId:$vodId"
+}
+
+data class Episode(val name: String, val url: String)
+
+data class PlayGroup(val from: String, val episodes: List<Episode>)
+
+/** 同名归一后的一组结果：UI 按组展示，点进去再选具体源。 */
+data class SearchGroup(val title: String, val items: List<VodItem>)
+
+data class WatchProgress(
+    val key: String,
+    val title: String,
+    val cover: String,
+    val groupIndex: Int,
+    val episodeIndex: Int,
+    val episodeName: String,
+    val positionMs: Long,
+    val durationMs: Long,
+    val updatedAt: Long,
+)

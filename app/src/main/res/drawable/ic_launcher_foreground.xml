@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 一只方匣子 -->
+    <path
+        android:pathData="M34,46 L74,46 L74,76 L34,76 Z"
+        android:strokeColor="#E8EAF6"
+        android:strokeWidth="3.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:fillColor="#00000000" />
+    <path
+        android:pathData="M34,46 L74,46"
+        android:strokeColor="#E8EAF6"
+        android:strokeWidth="3.5"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M50,60 L58,60"
+        android:strokeColor="#FFC857"
+        android:strokeWidth="3.5"
+        android:strokeLineCap="round" />
+
+    <!-- 匣口上方的一颗星 -->
+    <path
+        android:pathData="M54,22 L57.2,30.8 L66,34 L57.2,37.2 L54,46 L50.8,37.2 L42,34 L50.8,30.8 Z"
+        android:fillColor="#FFC857" />
+</vector>
