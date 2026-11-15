@@ -53,12 +53,17 @@ class CmsV10Api(private val client: HttpClient) {
     }.getOrDefault(false)
 
     private suspend fun fetch(site: SourceSite, params: Map<String, String>): List<VodItem> {
-        val response = client.get(endpoint(site.baseUrl)) {
-            url {
-                params.forEach { (key, value) -> parameters.append(key, value) }
+        val response = try {
+            client.get(endpoint(site.baseUrl)) {
+                url {
+                    params.forEach { (key, value) -> parameters.append(key, value) }
+                }
+                // 防盗链的 Referer / UA 后续统一放到平台层的 engine 拦截器里，这里先给一个通用 UA。
+                headers.append("User-Agent", USER_AGENT)
             }
-            // 防盗链的 Referer / UA 后续统一放到平台层的 engine 拦截器里，这里先给一个通用 UA。
-            headers.append("User-Agent", USER_AGENT)
+        } catch (error: Exception) {
+            // 源站超时/断连/证书异常等一律当作无结果，绝不让网络异常把上层带崩。
+            return emptyList()
         }
         if (response.status.value !in 200..299) return emptyList()
 

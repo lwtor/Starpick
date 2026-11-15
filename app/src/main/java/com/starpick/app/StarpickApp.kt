@@ -2,6 +2,10 @@ package com.starpick.app
 
 import android.app.Application
 import android.content.Context
+import coil3.ImageLoader
+import coil3.SingletonImageLoader
+import coil3.network.okhttp.OkHttpNetworkFetcherFactory
+import coil3.request.crossfade
 import com.starpick.app.core.api.CmsV10Api
 import com.starpick.app.core.api.DoubanApi
 import com.starpick.app.core.search.SearchAggregator
@@ -12,10 +16,12 @@ import dev.veneranative.updater.ReleaseVersionResolver
 import dev.veneranative.updater.Updater
 import dev.veneranative.updater.UpdaterConfig
 import dev.veneranative.updater.UpdaterStrings
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import okhttp3.OkHttpClient
 
 class StarpickApp : Application() {
     lateinit var container: AppContainer
@@ -23,8 +29,42 @@ class StarpickApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        configureImageLoader()
         container = AppContainer(this)
         container.startUpdateCheck()
+    }
+
+    /**
+     * 配置 Coil 全局 ImageLoader：豆瓣图片服务器（doubanio.com）有防盗链，
+     * 需要带 Referer 才能加载封面。这里用带拦截器的 OkHttpClient 统一注入。
+     */
+    private fun configureImageLoader() {
+        val client = OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .addInterceptor { chain ->
+                val request = chain.request()
+                val newRequest = if (request.url.host.contains("doubanio.com")) {
+                    request.newBuilder()
+                        .header("Referer", "https://movie.douban.com/")
+                        .header("User-Agent", "Mozilla/5.0 (Linux; Android 13) Starpick/0.4")
+                        .build()
+                } else {
+                    request
+                }
+                chain.proceed(newRequest)
+            }
+            .build()
+
+        SingletonImageLoader.setSafe { context ->
+            ImageLoader.Builder(context)
+                .components {
+                    add(OkHttpNetworkFetcherFactory(callFactory = { client }))
+                }
+                .crossfade(true)
+                .build()
+        }
     }
 }
 

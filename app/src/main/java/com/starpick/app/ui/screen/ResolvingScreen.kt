@@ -116,8 +116,14 @@ fun ResolvingScreen(
                 }
 
                 is ResolveState.Done -> {
-                    // 命中后立即进入详情，这里只短暂渲染以防竞态。
-                    LaunchedEffect(s) { onResolved(s.group) }
+                    // 命中后进入详情。用 remember 保证只回调一次，避免重复 push。
+                    var fired by remember(s.group.title) { mutableStateOf(false) }
+                    LaunchedEffect(s.group.title) {
+                        if (!fired) {
+                            fired = true
+                            onResolved(s.group)
+                        }
+                    }
                     CircularProgressIndicator()
                 }
             }

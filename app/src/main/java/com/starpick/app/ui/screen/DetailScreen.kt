@@ -43,6 +43,7 @@ import com.starpick.app.core.model.SearchGroup
 import com.starpick.app.core.model.VodItem
 import com.starpick.app.core.model.WatchProgress
 import com.starpick.app.core.parser.PlaylistParser
+import com.starpick.app.ui.component.EmptyHint
 import com.starpick.app.ui.component.SectionTitle
 import com.starpick.app.ui.component.VodCover
 import kotlinx.coroutines.launch
@@ -57,6 +58,23 @@ fun DetailScreen(
     val scope = rememberCoroutineScope()
     val sources by container.store.sources.collectAsState(initial = emptyList())
 
+    // 防御：SearchGroup.items 理论非空，但空值时直接给空态而非崩溃。
+    if (group.items.isEmpty()) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                }
+                Text("该条目没有可用的来源", style = MaterialTheme.typography.titleMedium)
+            }
+            EmptyHint("暂无播放来源", "换一个源或重新搜索")
+        }
+        return
+    }
+
     var selected by remember(group) { mutableStateOf(group.items.first()) }
     var resolved by remember(group) { mutableStateOf(group.items.first()) }
     var favorite by remember(group) { mutableStateOf(false) }
@@ -68,11 +86,15 @@ fun DetailScreen(
     }
 
     // 搜索结果里有些源不给播放串，换源或取详情时补一次。
+    // detail 是网络请求，用 runCatching 兜底：源超时/失败不能把详情页带崩。
     LaunchedEffect(selected) {
         var base = selected
         if (base.playUrl.isBlank()) {
             val site = sources.firstOrNull { it.id == base.sourceId }
-            if (site != null) base = container.api.detail(site, base.vodId) ?: base
+            if (site != null) {
+                base = runCatching { container.api.detail(site, base.vodId) }
+                    .getOrNull() ?: base
+            }
         }
         resolved = base
         lineIndex = 0

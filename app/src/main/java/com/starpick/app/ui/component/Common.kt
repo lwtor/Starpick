@@ -43,7 +43,7 @@ fun Hint(text: String) {
 
 /**
  * 影视封面。空封面用首字占位；有封面时按圆角裁切铺满。
- * 防盗链 Referer 后续可在 ImageRequest 统一注入。
+ * 豆瓣图片服务器有防盗链：自动给 doubanio.com 注入 Referer 与 UA。
  */
 @Composable
 fun VodCover(title: String, cover: String, modifier: Modifier = Modifier) {
@@ -62,6 +62,7 @@ fun VodCover(title: String, cover: String, modifier: Modifier = Modifier) {
             )
         }
     } else {
+        // 豆瓣图片防盗链 Referer 由全局 ImageLoader 的 Interceptor 统一注入（见 StarpickApp）。
         AsyncImage(
             model = ImageRequest.Builder(LocalContext.current)
                 .data(cover)
