@@ -115,6 +115,7 @@ fun PlayerScreen(
         Row(
             modifier = Modifier
                 .align(Alignment.TopStart)
+                .statusBarsPadding()
                 .padding(8.dp)
                 .background(Color(0x66000000)),
             verticalAlignment = Alignment.CenterVertically,
