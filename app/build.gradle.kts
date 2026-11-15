@@ -28,6 +28,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
@@ -49,4 +50,7 @@ dependencies {
 
     implementation(libs.coil.compose)
     implementation(libs.coil.network.okhttp)
+
+    // GitHub Release 应用内自升级（vendored 模块，见 updater/NOTICE）
+    implementation(project(":updater"))
 }

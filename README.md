@@ -11,6 +11,7 @@ Android 影视收藏与续播客户端。无自建服务端，直连用户自行
 - 详情：换源、线路与选集解析、缺播放串时自动补取详情
 - 播放：Media3 / ExoPlayer 播放 HLS
 - 片匣：收藏、继续观看、每 5 秒落盘进度并在进入播放页时自动 seek
+- 应用内自升级：启动时静默检查 GitHub Release 并预下载新版本 APK，首页顶部出现「安装 / 下载」入口
 
 ## 工程结构
 
@@ -19,6 +20,7 @@ Android 影视收藏与续播客户端。无自建服务端，直连用户自行
 | `core/` | 纯 Kotlin、零 `android.*` 依赖：模型、CMS 协议与宽松 JSON 解析、选集解析、并发聚合、Repository 契约 |
 | `platform/` | Ktor engine、JSON 文件存储、Media3、手动 DI 容器 |
 | `ui/` | Compose 页面与极简状态导航 |
+| `updater/` | GitHub Release 应用内自升级，vendor 自 [github-updater-android](https://github.com/lwtor/github-updater-android)（Apache-2.0，见 `updater/NOTICE`） |
 
 前期刻意不建 KMP 多 target、不写 `expect/actual`、不引入桌面依赖；`core/` 保持纯 Kotlin，将来可整体搬进 `commonMain`。同样为控制范围，未引入 Room、Navigation、Hilt/Koin。
 
@@ -39,6 +41,16 @@ ANDROID_HOME="$HOME/Library/Android/sdk" \
 ## 使用
 
 首次打开 →「源」→ 填写 CMS V10 站点根地址 → 添加 →「测试」显示可用 → 回「搜索」输入片名。
+
+## 发布与自升级
+
+自升级读 GitHub 的 `releases/latest`（draft 与 prerelease 不参与），并按以下规则判定更新：
+
+- 资产名尾部 `-<versionCode>` 优先，如 `Starpick-2.apk` → versionCode `2`；读不到时回退到 tag `vX.Y.Z` 折算（`v0.1.0` → `1000`）。
+- release 的 versionCode 必须**严格大于**已装版本才算更新，相等即视为最新。
+- 每次发布请同步提升 `app/build.gradle.kts` 的 `versionCode`，否则客户端永远收不到更新。
+
+发布步骤：`gh release create v0.1.1 app/build/outputs/apk/debug/app-debug.apk#Starpick-<versionCode>.apk`（资产名尾部带上真实 versionCode）。
 
 ## 说明
 

@@ -7,10 +7,10 @@ app/build/
 local.properties
 .DS_Store
 .cxx/
-.cxx
 .externalNativeBuild/
 captures/
 *.apk
 
 # WorkBuddy 项目笔记，仅本地保留
 .workbuddy/
+tools/

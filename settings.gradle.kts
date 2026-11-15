@@ -15,4 +15,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "Starpick"
-include(":app")
+include(":app", ":updater")

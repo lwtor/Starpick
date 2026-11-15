@@ -28,6 +28,7 @@ import com.starpick.app.core.model.VodItem
 import com.starpick.app.core.model.WatchProgress
 import com.starpick.app.ui.component.Hint
 import com.starpick.app.ui.component.SectionTitle
+import com.starpick.app.ui.component.UpdateCard
 import com.starpick.app.ui.component.VodCover
 import com.starpick.app.ui.component.formatPosition
 
@@ -46,6 +47,7 @@ fun HomeScreen(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
+        item { UpdateCard(container) }
         item { SectionTitle("继续观看") }
         if (progress.isEmpty()) {
             item { Hint("还没有观看记录，去搜索一部剧开始吧") }
