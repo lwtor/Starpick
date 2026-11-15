@@ -3,6 +3,7 @@ package com.starpick.app
 import android.app.Application
 import android.content.Context
 import com.starpick.app.core.api.CmsV10Api
+import com.starpick.app.core.api.DoubanApi
 import com.starpick.app.core.search.SearchAggregator
 import com.starpick.app.platform.createHttpClient
 import com.starpick.app.platform.createOkHttpClient
@@ -37,6 +38,7 @@ class AppContainer(context: Context) {
 
     val store = StarpickStore(context.applicationContext)
     val api = CmsV10Api(httpClient)
+    val douban = DoubanApi(httpClient)
     val aggregator = SearchAggregator(api)
 
     /**

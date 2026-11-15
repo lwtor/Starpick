@@ -5,6 +5,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
+import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -26,8 +28,10 @@ import com.starpick.app.AppContainer
 import com.starpick.app.core.model.SearchGroup
 import com.starpick.app.core.model.VodItem
 import com.starpick.app.ui.screen.DetailScreen
+import com.starpick.app.ui.screen.DiscoverScreen
 import com.starpick.app.ui.screen.HomeScreen
 import com.starpick.app.ui.screen.PlayerScreen
+import com.starpick.app.ui.screen.ResolvingScreen
 import com.starpick.app.ui.screen.SearchScreen
 import com.starpick.app.ui.screen.SettingsScreen
 
@@ -36,10 +40,12 @@ import com.starpick.app.ui.screen.SettingsScreen
  * UI 本来就是平台层，将来接 Compose Multiplatform 时替换这一处即可。
  */
 sealed interface Screen {
+    data object Discover : Screen
     data object Home : Screen
     data object Search : Screen
     data object Settings : Screen
     data class Detail(val group: SearchGroup) : Screen
+    data class Resolving(val title: String) : Screen
     data class Player(val item: VodItem, val groupIndex: Int, val episodeIndex: Int) : Screen
 }
 
@@ -50,6 +56,7 @@ private data class TabSpec(
 )
 
 private val tabs = listOf(
+    TabSpec(Screen.Discover, "首页", Icons.Filled.Explore),
     TabSpec(Screen.Home, "片匣", Icons.Filled.Home),
     TabSpec(Screen.Search, "搜索", Icons.Filled.Search),
     TabSpec(Screen.Settings, "设置", Icons.Filled.Settings),
@@ -58,7 +65,7 @@ private val tabs = listOf(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StarpickNav(container: AppContainer) {
-    val stack = remember { mutableStateListOf<Screen>(Screen.Home) }
+    val stack = remember { mutableStateListOf<Screen>(Screen.Discover) }
     val current = stack.last()
     val pop: () -> Unit = { if (stack.size > 1) stack.removeLastOrNull() }
     val goTab: (Screen) -> Unit = { tab ->
@@ -66,6 +73,7 @@ fun StarpickNav(container: AppContainer) {
         stack.add(tab)
     }
 
+    // 只在栈深 > 1 时拦截返回；栈深 == 1 时放行给系统（首页/根 tab 返回即退出）。
     BackHandler(enabled = stack.size > 1) { pop() }
 
     when (current) {
@@ -78,6 +86,13 @@ fun StarpickNav(container: AppContainer) {
             },
         )
 
+        is Screen.Resolving -> ResolvingScreen(
+            container = container,
+            title = current.title,
+            onResolved = { group -> stack.add(Screen.Detail(group)) },
+            onBack = pop,
+        )
+
         is Screen.Player -> PlayerScreen(
             container = container,
             item = current.item,
@@ -88,17 +103,17 @@ fun StarpickNav(container: AppContainer) {
 
         else -> {
             val title = when (current) {
-                is Screen.Home -> "星匣"
+                is Screen.Discover -> "星匣"
+                is Screen.Home -> "片匣"
                 is Screen.Search -> "搜索"
                 is Screen.Settings -> "设置"
-                else -> "星匣"
             }
             Scaffold(
                 // CenterAlignedTopAppBar 自带 windowInsets 处理，状态栏不再遮挡标题。
                 topBar = {
                     CenterAlignedTopAppBar(
                         title = { Text(title) },
-                        colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                        colors = TopAppBarDefaults.topAppBarColors(
                             containerColor = MaterialTheme.colorScheme.background,
                         ),
                     )
@@ -111,6 +126,11 @@ fun StarpickNav(container: AppContainer) {
                         .fillMaxSize(),
                 ) {
                     when (current) {
+                        Screen.Discover -> DiscoverScreen(
+                            container = container,
+                            onPick = { title -> stack.add(Screen.Resolving(title)) },
+                        )
+
                         Screen.Home -> HomeScreen(
                             container = container,
                             onOpen = { stack.add(Screen.Detail(it)) },
@@ -125,8 +145,6 @@ fun StarpickNav(container: AppContainer) {
                         )
 
                         Screen.Settings -> SettingsScreen(container)
-
-                        else -> Unit
                     }
                 }
             }
