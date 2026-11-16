@@ -48,7 +48,18 @@ fun UpdateCard(container: AppContainer, onOpenSettings: () -> Unit) {
 
         is UpdateUiState.Downloading -> Triple(
             "正在下载新版本",
-            s.fraction?.let { "已完成 ${(it * 100).toInt()}%，可在设置里查看" } ?: "可在设置里查看进度",
+            buildString {
+                append(s.fraction?.let { "已完成 ${(it * 100).toInt()}%" } ?: "准备中")
+                if (s.bytesPerSecond >= 1024) {
+                    append(" · ")
+                    if (s.bytesPerSecond >= 1024L * 1024) {
+                        append("%.1f MB/s".format(s.bytesPerSecond / 1024.0 / 1024.0))
+                    } else {
+                        append("${s.bytesPerSecond / 1024} KB/s")
+                    }
+                }
+                append("，可在设置里查看")
+            },
             Accent.Brand,
         )
 

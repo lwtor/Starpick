@@ -31,4 +31,6 @@ dependencies {
     // The download runs as a WorkManager worker so it survives the process and the device's own
     // constraints.
     implementation(libs.androidx.work.runtime.ktx)
+
+    testImplementation("junit:junit:4.13.2")
 }

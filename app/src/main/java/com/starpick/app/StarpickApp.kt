@@ -60,6 +60,8 @@ sealed interface UpdateUiState {
         val fraction: Float?,
         val bytes: Long,
         val totalBytes: Long?,
+        /** 最近几秒的平均下载速度（字节/秒），0 表示还没测出第一段速度。 */
+        val bytesPerSecond: Long = 0L,
     ) : UpdateUiState
     data class Ready(val versionCode: Long, val file: File) : UpdateUiState
     data class Failed(val message: String) : UpdateUiState
@@ -298,9 +300,13 @@ class AppContainer(context: Context) {
         }
     }
 
-    /** 下载更新包。走库的流式下载，每 256 KB 把进度回填到 [update]。 */
+    /** 上一次尝试下载的版本与资产，失败后「重试」直接续传，而不是重新检查一遍。 */
+    private var lastAttempt: Pair<Long, ReleaseAsset>? = null
+
+    /** 下载更新包。库内多连接分段下载，进度按时间节流回调（约 300ms 一次）。 */
     fun downloadUpdate(versionCode: Long, asset: ReleaseAsset) {
         if (_update.value is UpdateUiState.Downloading) return
+        lastAttempt = versionCode to asset
         appScope.launch {
             _update.value = UpdateUiState.Downloading(
                 fraction = null,
@@ -313,6 +319,7 @@ class AppContainer(context: Context) {
                         fraction = progress.fraction,
                         bytes = progress.bytesDownloaded,
                         totalBytes = progress.totalBytes,
+                        bytesPerSecond = progress.bytesPerSecond,
                     )
                 }
                 downloadedApk = versionCode to file
@@ -322,6 +329,12 @@ class AppContainer(context: Context) {
                 _update.value = UpdateUiState.Failed(error.message ?: "下载失败")
             }
         }
+    }
+
+    /** 下载失败后的「重试」：续传上次的分段文件，省掉重复的检查与已下载的部分。 */
+    fun retryDownload() {
+        val attempt = lastAttempt
+        if (attempt == null) checkUpdate() else downloadUpdate(attempt.first, attempt.second)
     }
 
     /** 交给系统安装器，用户在系统弹窗里确认。 */

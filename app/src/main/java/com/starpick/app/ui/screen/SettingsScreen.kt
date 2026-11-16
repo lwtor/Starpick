@@ -436,6 +436,18 @@ private fun VersionRow(container: AppContainer) {
                 append(" / ")
                 append(formatMegabytes(s.totalBytes))
             }
+            if (s.bytesPerSecond > 0) {
+                append(" · ")
+                append(formatSpeed(s.bytesPerSecond))
+                val remaining = (s.totalBytes ?: 0L) - s.bytes
+                if (remaining > 0) {
+                    val seconds = remaining / s.bytesPerSecond
+                    if (seconds in 1..7200) {
+                        append("，剩 ")
+                        append(formatEta(seconds))
+                    }
+                }
+            }
         }
 
         is UpdateUiState.Ready -> "新版本已下载，点「安装」"
@@ -528,7 +540,7 @@ private fun VersionRow(container: AppContainer) {
                 is UpdateUiState.Failed -> GhostButton(
                     text = "重试",
                     modifier = Modifier.height(34.dp),
-                    onClick = { container.checkUpdate() },
+                    onClick = { container.retryDownload() },
                 )
             }
         }
@@ -676,6 +688,19 @@ private fun MediaCacheRow(container: AppContainer) {
 
 private fun formatMegabytes(bytes: Long): String =
     "%.1f MB".format(bytes / 1024.0 / 1024.0)
+
+/** 下载速度：慢连接下 KB/s 更有信息量，别一律换算成 MB。 */
+private fun formatSpeed(bytesPerSecond: Long): String = when {
+    bytesPerSecond >= 1024L * 1024 -> "%.1f MB/s".format(bytesPerSecond / 1024.0 / 1024.0)
+    bytesPerSecond >= 1024 -> "%.0f KB/s".format(bytesPerSecond / 1024.0)
+    else -> "${bytesPerSecond} B/s"
+}
+
+private fun formatEta(seconds: Long): String = when {
+    seconds < 60 -> "${seconds} 秒"
+    seconds < 3600 -> "${seconds / 60} 分 ${seconds % 60} 秒"
+    else -> "很久"
+}
 
 /** 缓存大小按量级取单位，1 GB 上限显示成「1.0 GB」比「1024 MB」好读。 */
 private fun formatCacheSize(bytes: Long): String = when {
