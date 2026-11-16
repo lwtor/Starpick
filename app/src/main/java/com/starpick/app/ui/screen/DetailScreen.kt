@@ -2,6 +2,8 @@ package com.starpick.app.ui.screen
 
 import android.content.res.Configuration
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -54,6 +56,7 @@ import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.starpick.app.AppContainer
+import com.starpick.app.core.model.DoubanDetail
 import com.starpick.app.core.model.SearchGroup
 import com.starpick.app.core.model.VodItem
 import com.starpick.app.core.model.WatchProgress
@@ -66,20 +69,18 @@ import com.starpick.app.ui.component.LineChip
 import com.starpick.app.ui.component.PrimaryButton
 import com.starpick.app.ui.component.SectionHeader
 import com.starpick.app.ui.component.SquareIconButton
-import com.starpick.app.ui.component.VodCover
+import com.starpick.app.ui.theme.Accent
 import com.starpick.app.ui.theme.Ink
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * 详情页 = 播放页：同一个页面内完成「看详情 → 点播放 → 切集 → 换源」。
- *
- * 播放器不是跳转过去的独立页面，而是内嵌在本页顶部：
- *  - 未开始播放：顶部是海报头图；
- *  - 开始播放后：顶部原地切换为 16:9 播放器（横屏自动铺满全屏），
- *    下面的简介 / 换源 / 线路 / 选集全部保留，随时可见可点。
- * 返回键：横屏播放中先退全屏，其余情况直接退出本页（不再多一层「收起播放器」）。
+ * 详情页 = 播放页，三段式布局（同一个页面，无跳转）：
+ *  1. 顶部：16:9 区域，未播放时是豆瓣封面，点播放后 Crossfade 淡入播放器（横屏铺满全屏）。
+ *  2. 中部：豆瓣资料卡（评分 / 年份 / 类型 / 地区 / 时长 / 导演 / 演员 / 短评 / 简介），
+ *     查不到豆瓣信息时显示兜底卡，但播放、选集等一律照常。
+ *  3. 底部：视频源及源相关信息（线路数 / 集数 / 播放地址状态）、线路、选集。
  */
 @Composable
 fun DetailScreen(
@@ -113,12 +114,24 @@ fun DetailScreen(
     var resumeRecord by remember(group) { mutableStateOf<WatchProgress?>(null) }
     var lineIndex by remember(group) { mutableStateOf(0) }
     var expanded by remember(group) { mutableStateOf(false) }
+    var douban by remember(group) { mutableStateOf<DoubanDetail?>(null) }
+    var doubanLoading by remember(group) { mutableStateOf(true) }
     // 播放只是本页顶部的一个状态切换，不动导航栈。
     var playing by remember(group) { mutableStateOf<PlayTarget?>(null) }
 
     // 横屏播放中：由 PlayerSurface 的 BackHandler 先响应，只退全屏；
     // 其余情况（含横屏但未播放）直接退出详情页。
     BackHandler(enabled = !isLandscape || playing == null) { onBack() }
+
+    // 按片名查豆瓣详情：失败就留 null，页面显示兜底卡，绝不影响播放与选集。
+    LaunchedEffect(group.title) {
+        doubanLoading = true
+        val detail = withContext(Dispatchers.IO) {
+            container.douban.detailByTitle(group.title)
+        }
+        douban = detail
+        doubanLoading = false
+    }
 
     LaunchedEffect(group) {
         val record = initialPlay ?: container.store.progressFor(contentKeyOf(group.title))
@@ -138,8 +151,6 @@ fun DetailScreen(
     }
 
     // 搜索结果里有些源不给播放串，换源或取详情时补一次。
-    // 依赖 sources 一起作为 key，等 sources 收集到之后再补，避免拿空列表直接放弃；
-    // 网络请求切 IO，整体 try-catch 兜底，任何异常都不能把详情页带崩。
     LaunchedEffect(selected, sources) {
         runCatching {
             var base = selected
@@ -159,7 +170,6 @@ fun DetailScreen(
             }
             val record = container.store.progressFor(base.contentKey)
             resumeRecord = record
-            // 同一条记录才恢复线路；源不同时线路编号不通用。
             val wanted = if (record != null && record.sourceId == base.sourceId && record.vodId == base.vodId) {
                 record.groupIndex
             } else 0
@@ -174,68 +184,84 @@ fun DetailScreen(
     }
     val episodes = playGroups.getOrNull(lineIndex)?.episodes.orEmpty()
 
-    val target = playing
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(if (isLandscape && target != null) Color.Black else Ink.Base),
+            .background(if (isLandscape && playing != null) Color.Black else Ink.Base),
     ) {
-        // 顶部：未播放时是海报头图，开始播放后原地换成内嵌播放器。
-        if (target != null) {
-            PlayerSurface(
-                container = container,
-                item = target.item,
-                groupIndex = target.groupIndex,
-                episodeIndex = target.episodeIndex,
-                onGroupChange = { g -> playing = playing?.copy(groupIndex = g, episodeIndex = 0) },
-                onEpisodeChange = { e -> playing = playing?.copy(episodeIndex = e) },
-                onExit = onBack,
-                modifier = if (isLandscape) {
-                    Modifier.fillMaxSize()
-                } else {
-                    Modifier.fillMaxWidth().aspectRatio(16f / 9f)
-                },
-            )
-        } else {
-            DetailHeader(
-                item = resolved,
-                favorite = favorite,
-                onBack = onBack,
-                onToggleFavorite = {
-                    scope.launch {
-                        container.store.toggleFavorite(resolved)
-                        favorite = container.store.isFavorite(resolved.key)
+        // ── 1. 顶部：封面（豆瓣海报）⇄ 播放器，Crossfade 平滑切换，盒子尺寸一致。
+        Box(
+            modifier = if (isLandscape && playing != null) {
+                Modifier.fillMaxSize()
+            } else {
+                Modifier.fillMaxWidth().aspectRatio(16f / 9f).statusBarsPadding()
+            },
+        ) {
+            Crossfade(
+                targetState = playing != null,
+                animationSpec = tween(durationMillis = 320),
+                label = "cover-to-player",
+            ) { inPlayer ->
+                if (inPlayer) {
+                    val target = playing
+                    if (target != null) {
+                        PlayerSurface(
+                            container = container,
+                            item = target.item,
+                            groupIndex = target.groupIndex,
+                            episodeIndex = target.episodeIndex,
+                            onGroupChange = { g -> playing = playing?.copy(groupIndex = g, episodeIndex = 0) },
+                            onEpisodeChange = { e -> playing = playing?.copy(episodeIndex = e) },
+                            onExit = onBack,
+                            modifier = Modifier.fillMaxSize(),
+                        )
                     }
-                },
-            )
+                } else {
+                    CoverHero(
+                        title = group.title,
+                        cover = douban?.cover?.takeIf { it.isNotBlank() } ?: resolved.cover,
+                        rate = douban?.rate.orEmpty(),
+                        year = douban?.year.orEmpty(),
+                        onBack = onBack,
+                        onPlay = {
+                            val record = resumeRecord
+                            if (record != null) {
+                                playing = PlayTarget(resolved, record.groupIndex, record.episodeIndex)
+                            } else if (episodes.isNotEmpty()) {
+                                playing = PlayTarget(resolved, lineIndex, 0)
+                            }
+                        },
+                    )
+                }
+            }
         }
 
-        if (!(isLandscape && target != null)) {
+        // ── 2 / 3. 下方详情：横屏播放时让位给全屏播放器，其余时候照常显示。
+        if (!(isLandscape && playing != null)) {
             LazyColumn(
                 modifier = Modifier.weight(1f),
                 contentPadding = PaddingValues(bottom = 28.dp),
             ) {
-                // 播放中补一条紧凑片名条，否则顶部换成播放器后看不到片名。
-                if (target != null) {
+                // 播放中补一条紧凑片名条，方便边看边确认当前集。
+                if (playing != null) {
                     item {
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .statusBarsPadding()
-                                .padding(horizontal = 20.dp, vertical = 12.dp),
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Column(Modifier.weight(1f)) {
                                 Text(
-                                    text = target.item.title,
+                                    text = group.title,
                                     style = MaterialTheme.typography.titleMedium,
                                     color = Color.White,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
-                                val epName = playGroups
-                                    .getOrNull(target.groupIndex)?.episodes
-                                    ?.getOrNull(target.episodeIndex)?.name
+                                val playTarget = playing
+                                val epName = if (playTarget != null) {
+                                    playGroups.getOrNull(playTarget.groupIndex)?.episodes
+                                        ?.getOrNull(playTarget.episodeIndex)?.name
+                                } else null
                                 if (!epName.isNullOrBlank()) {
                                     Text(
                                         text = "正在播放 · $epName",
@@ -246,37 +272,28 @@ fun DetailScreen(
                                     )
                                 }
                             }
-                            SquareIconButton(
-                                icon = if (favorite) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
-                                contentDescription = "收藏",
-                                active = favorite,
-                                onClick = {
-                                    scope.launch {
-                                        container.store.toggleFavorite(resolved)
-                                        favorite = container.store.isFavorite(resolved.key)
-                                    }
-                                },
-                            )
                         }
                     }
                 }
 
+                // ── 中部：豆瓣资料卡 / 兜底卡。
+                item {
+                    DoubanInfoCard(
+                        detail = douban,
+                        loading = doubanLoading,
+                        description = resolved.description,
+                        expanded = expanded,
+                    ) { expanded = !expanded }
+                }
+
+                // 收藏入口（详情信息卡下方，避免占用封面区）。
                 item {
                     Row(
-                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        if (target != null) {
-                            // 已经在播放：主按钮只提示状态，换集走下方选集区。
-                            PrimaryButton(
-                                text = "播放中 · 在下方选集切换",
-                                icon = Icons.Filled.PlayArrow,
-                                modifier = Modifier.weight(1f),
-                                enabled = false,
-                                onClick = {},
-                            )
-                        } else {
+                        if (playing == null) {
                             val record = resumeRecord
                             val label = when {
                                 record != null -> "继续观看 ${record.episodeName.ifBlank { "上次进度" }}"
@@ -296,65 +313,41 @@ fun DetailScreen(
                                     }
                                 },
                             )
-                            SquareIconButton(
-                                icon = if (favorite) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
-                                contentDescription = "收藏",
-                                active = favorite,
-                                onClick = {
-                                    scope.launch {
-                                        container.store.toggleFavorite(resolved)
-                                        favorite = container.store.isFavorite(resolved.key)
-                                    }
-                                },
+                        }
+                        SquareIconButton(
+                            icon = if (favorite) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
+                            contentDescription = "收藏",
+                            active = favorite,
+                            onClick = {
+                                scope.launch {
+                                    container.store.toggleFavorite(resolved)
+                                    favorite = container.store.isFavorite(resolved.key)
+                                }
+                            },
+                        )
+                    }
+                }
+
+                // ── 底部：视频源及源相关信息。
+                item { SectionHeader(title = "视频源", trailing = "${group.items.size} 个") }
+                item {
+                    Row(
+                        modifier = Modifier
+                            .horizontalScroll(rememberScrollState())
+                            .padding(horizontal = 20.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        group.items.forEach { item ->
+                            LineChip(
+                                text = item.sourceName,
+                                selected = item.key == selected.key,
+                                onClick = { selected = item },
                             )
                         }
                     }
                 }
-
-                if (resolved.description.isNotBlank()) {
-                    item {
-                        Column(Modifier.padding(horizontal = 20.dp)) {
-                            Text(
-                                text = resolved.description.take(300),
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = Ink.Text2,
-                                maxLines = if (expanded) Int.MAX_VALUE else 4,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            if (resolved.description.length > 120) {
-                                Text(
-                                    text = if (expanded) "收起" else "展开",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = Ink.Text3,
-                                    modifier = Modifier
-                                        .padding(top = 6.dp)
-                                        .clickable { expanded = !expanded },
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // 换源：同一部片在不同源里的集数不同，放在选集之前让人先选源。
-                if (group.items.size > 1) {
-                    item { SectionHeader(title = "来源", trailing = "${group.items.size} 个") }
-                    item {
-                        Row(
-                            modifier = Modifier
-                                .horizontalScroll(rememberScrollState())
-                                .padding(horizontal = 20.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            group.items.forEach { item ->
-                                LineChip(
-                                    text = item.sourceName,
-                                    selected = item.key == selected.key,
-                                    onClick = { selected = item },
-                                )
-                            }
-                        }
-                    }
-                }
+                // 当前源的附加信息：线路数 / 集数 / 播放地址状态。
+                item { SourceInfoRow(item = resolved, groupCount = playGroups.size, episodeCount = episodes.size) }
 
                 if (playGroups.size > 1) {
                     item { SectionHeader(title = "线路", trailing = "${playGroups.size} 条") }
@@ -382,7 +375,6 @@ fun DetailScreen(
                         trailing = if (episodes.isEmpty()) null else "共 ${episodes.size} 集",
                     )
                 }
-
                 item {
                     if (episodes.isEmpty()) {
                         Text(
@@ -392,13 +384,12 @@ fun DetailScreen(
                             modifier = Modifier.padding(horizontal = 20.dp),
                         )
                     } else {
-                        // 高亮优先级：正在播放的集 > 上次观看记录。
                         val record = resumeRecord
+                        val active = playing
                         val activeEpisode = when {
-                            target != null && target.item.key == resolved.key && target.groupIndex == lineIndex ->
-                                target.episodeIndex
-                            record != null && record.groupIndex == lineIndex ->
-                                record.episodeIndex
+                            active != null && active.item.key == resolved.key && active.groupIndex == lineIndex ->
+                                active.episodeIndex
+                            record != null && record.groupIndex == lineIndex -> record.episodeIndex
                             else -> -1
                         }
                         FlowPosterGrid(
@@ -414,9 +405,9 @@ fun DetailScreen(
                                 selected = activeEpisode == index,
                                 seen = activeEpisode > index,
                                 onClick = {
-                                    if (target != null && target.item.key == resolved.key) {
-                                        // 已在播放：只切集，播放器原地换片源，不重建页面。
-                                        playing = target.copy(groupIndex = lineIndex, episodeIndex = index)
+                                    val active = playing
+                                    if (active != null && active.item.key == resolved.key) {
+                                        playing = active.copy(groupIndex = lineIndex, episodeIndex = index)
                                     } else {
                                         playing = PlayTarget(resolved, lineIndex, index)
                                     }
@@ -430,128 +421,221 @@ fun DetailScreen(
     }
 }
 
-/** 头部：海报模糊铺底 + 返回 + 海报 / 片名 / 元信息。 */
+/** 顶部封面态：豆瓣海报铺底 + 渐变 + 片名/评分元信息 + 中央播放键。 */
 @Composable
-private fun DetailHeader(
-    item: VodItem,
-    favorite: Boolean,
+private fun CoverHero(
+    title: String,
+    cover: String,
+    rate: String,
+    year: String,
     onBack: () -> Unit,
-    onToggleFavorite: () -> Unit,
+    onPlay: () -> Unit,
 ) {
-    Box(modifier = Modifier.fillMaxWidth().height(300.dp)) {
-        AsyncImage(
-            model = ImageRequest.Builder(LocalContext.current)
-                .data(item.cover)
-                .crossfade(true)
-                .build(),
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier
-                .fillMaxSize()
-                .blur(22.dp)
-                .background(Ink.Card),
-        )
+    Box(modifier = Modifier.fillMaxSize().background(Ink.Card)) {
+        if (cover.isNotBlank()) {
+            AsyncImage(
+                model = ImageRequest.Builder(LocalContext.current).data(cover).crossfade(true).build(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize().blur(12.dp),
+            )
+        }
         Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        colorStops = arrayOf(
-                            0f to Color(0x990A0E14),
-                            0.45f to Color(0x660A0E14),
-                            0.82f to Color(0xE60A0E14),
-                            1f to Ink.Base,
-                        ),
+            modifier = Modifier.fillMaxSize().background(
+                Brush.verticalGradient(
+                    colorStops = arrayOf(
+                        0f to Color(0x990A0E14),
+                        0.5f to Color(0x660A0E14),
+                        1f to Color(0xF20A0E14),
                     ),
                 ),
+            ),
         )
 
-        Row(
+        // 返回键。
+        Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .statusBarsPadding()
-                .padding(horizontal = 8.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
+                .align(Alignment.TopStart)
+                .padding(8.dp)
+                .size(36.dp)
+                .clip(RoundedCornerShape(18.dp))
+                .background(Color(0x6606080C))
+                .clickable(onClick = onBack),
+            contentAlignment = Alignment.Center,
         ) {
-            Box(
-                modifier = Modifier
-                    .size(36.dp)
-                    .clip(RoundedCornerShape(18.dp))
-                    .background(Color(0x6606080C))
-                    .clickable(onClick = onBack),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = "返回",
-                    tint = Color.White,
-                    modifier = Modifier.size(18.dp),
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                contentDescription = "返回",
+                tint = Color.White,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+
+        // 封面中央覆盖层：片名 + 元信息 + 播放键，整块可点播放。
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .clickable(onClick = onPlay)
+                .padding(horizontal = 20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            if (rate.isNotBlank()) {
+                Text(
+                    text = "豆瓣 $rate",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Accent.Gold,
+                    fontWeight = FontWeight.Bold,
                 )
+                Spacer(Modifier.height(6.dp))
             }
-            Spacer(Modifier.weight(1f))
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleLarge,
+                color = Color.White,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (year.isNotBlank()) {
+                Spacer(Modifier.height(4.dp))
+                Text(text = year, style = MaterialTheme.typography.labelSmall, color = Color(0xB3FFFFFF))
+            }
+            Spacer(Modifier.height(14.dp))
             Box(
                 modifier = Modifier
-                    .size(36.dp)
-                    .clip(RoundedCornerShape(18.dp))
-                    .background(Color(0x6606080C))
-                    .clickable(onClick = onToggleFavorite),
+                    .size(56.dp)
+                    .clip(RoundedCornerShape(28.dp))
+                    .background(Color(0x33FFFFFF)),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(
-                    imageVector = if (favorite) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
-                    contentDescription = "收藏",
-                    tint = if (favorite) Color(0xFFF6BE4F) else Color.White,
-                    modifier = Modifier.size(18.dp),
+                Icon(Icons.Filled.PlayArrow, contentDescription = "播放", tint = Color.White, modifier = Modifier.size(28.dp))
+            }
+        }
+    }
+}
+
+/** 中部：豆瓣资料卡。有数据显示完整信息；无数据显示兜底卡，但简介照常显示。 */
+@Composable
+private fun DoubanInfoCard(
+    detail: DoubanDetail?,
+    loading: Boolean,
+    description: String,
+    expanded: Boolean,
+    onToggleExpand: () -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp)) {
+        if (loading) {
+            // 加载中先占位，避免「兜底卡闪一下再跳豆瓣卡」的突兀。
+            Spacer(Modifier.height(52.dp))
+        } else if (detail != null) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (detail.rate.isNotBlank()) {
+                    Text(detail.rate, style = MaterialTheme.typography.headlineSmall, color = Accent.Gold, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.width(6.dp))
+                }
+                Text("豆瓣评分", style = MaterialTheme.typography.labelSmall, color = Ink.Text3)
+            }
+            val meta = listOfNotNull(
+                detail.year.takeIf { it.isNotBlank() },
+                detail.types.joinToString(" / ").takeIf { it.isNotBlank() },
+                detail.region.takeIf { it.isNotBlank() },
+                detail.duration.takeIf { it.isNotBlank() },
+            ).joinToString(" · ")
+            if (meta.isNotBlank()) {
+                Spacer(Modifier.height(8.dp))
+                Text(meta, style = MaterialTheme.typography.bodySmall, color = Ink.Text2)
+            }
+            if (detail.directors.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                InfoLine(label = "导演", value = detail.directors.joinToString(" / "))
+            }
+            if (detail.actors.isNotEmpty()) {
+                Spacer(Modifier.height(6.dp))
+                InfoLine(label = "主演", value = detail.actors.take(8).joinToString(" / "))
+            }
+            if (detail.comment.isNotBlank()) {
+                Spacer(Modifier.height(10.dp))
+                Text("「${detail.comment}」", style = MaterialTheme.typography.bodySmall, color = Accent.Gold)
+            }
+        } else {
+            // 无豆瓣信息兜底：明确告知，但不阻断任何播放/选集操作。
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Ink.Card)
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "暂无豆瓣影片信息",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Ink.Text2,
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = "不影响播放与选集",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Ink.Text3,
                 )
             }
         }
 
-        Row(
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 16.dp),
-        ) {
-            VodCover(
-                title = item.title,
-                cover = item.cover,
-                modifier = Modifier.size(width = 96.dp, height = 136.dp),
-                shape = RoundedCornerShape(10.dp),
+        // 简介用采集站剧情简介，与豆瓣短评互补。
+        if (description.isNotBlank()) {
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = description.take(300),
+                style = MaterialTheme.typography.bodyMedium,
+                color = Ink.Text2,
+                maxLines = if (expanded) Int.MAX_VALUE else 4,
+                overflow = TextOverflow.Ellipsis,
             )
-            Spacer(Modifier.width(15.dp))
-            Column(Modifier.weight(1f).padding(bottom = 4.dp)) {
+            if (description.length > 120) {
                 Text(
-                    text = item.title,
-                    style = MaterialTheme.typography.titleLarge,
-                    color = Color.White,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Spacer(Modifier.height(7.dp))
-                Text(
-                    text = listOfNotNull(
-                        item.year.takeIf { it.isNotBlank() },
-                        item.area.takeIf { it.isNotBlank() },
-                        item.category.takeIf { it.isNotBlank() },
-                    ).joinToString(" · ").ifBlank { item.sourceName },
+                    text = if (expanded) "收起" else "展开",
                     style = MaterialTheme.typography.labelMedium,
-                    color = Color(0xB3FFFFFF),
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
+                    color = Ink.Text3,
+                    modifier = Modifier.padding(top = 6.dp).clickable(onClick = onToggleExpand),
                 )
-                if (item.remark.isNotBlank()) {
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        text = item.remark,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = Color(0xFFF6BE4F),
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
             }
         }
+    }
+}
+
+@Composable
+private fun InfoLine(label: String, value: String) {
+    Row {
+        Text(text = "$label  ", style = MaterialTheme.typography.bodySmall, color = Ink.Text3)
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodySmall,
+            color = Ink.Text2,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/** 当前源附加信息：线路数 / 集数 / 播放地址状态。 */
+@Composable
+private fun SourceInfoRow(item: VodItem, groupCount: Int, episodeCount: Int) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("当前：${item.sourceName}", style = MaterialTheme.typography.labelMedium, color = Ink.Text1)
+        Spacer(Modifier.width(12.dp))
+        Text("$groupCount 条线路", style = MaterialTheme.typography.labelSmall, color = Ink.Text3)
+        Spacer(Modifier.width(10.dp))
+        Text("$episodeCount 集", style = MaterialTheme.typography.labelSmall, color = Ink.Text3)
+        Spacer(Modifier.weight(1f))
+        Text(
+            text = if (item.playUrl.isNotBlank()) "有播放地址" else "待解析",
+            style = MaterialTheme.typography.labelSmall,
+            color = if (item.playUrl.isNotBlank()) Accent.Gold else Ink.Text3,
+        )
     }
 }
 
@@ -575,12 +659,7 @@ private fun BackRow(title: String, onBack: () -> Unit) {
                 modifier = Modifier.size(20.dp),
             )
         }
-        Text(
-            text = title,
-            style = MaterialTheme.typography.titleMedium,
-            color = Ink.Text1,
-            maxLines = 1,
-        )
+        Text(text = title, style = MaterialTheme.typography.titleMedium, color = Ink.Text1, maxLines = 1)
     }
 }
 

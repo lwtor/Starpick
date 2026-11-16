@@ -1,5 +1,6 @@
 package com.starpick.app.core.api
 
+import com.starpick.app.core.model.DoubanDetail
 import com.starpick.app.core.model.DoubanSubject
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
@@ -62,6 +63,101 @@ class DoubanApi(private val client: HttpClient) {
             }
         }.getOrDefault(emptyList())
     }
+
+    /**
+     * 按片名查豆瓣详情：先 suggest 拿 id / 海报 / 年份，再用 id 取评分 / 导演 / 演员 / 类型。
+     *
+     * 两步都走公开 JSON、无需鉴权；任何一步失败都返回 null，调用方显示兜底即可。
+     * 详情页用它把「采集站条目」补成一张完整的豆瓣资料卡。
+     */
+    suspend fun detailByTitle(title: String): DoubanDetail? {
+        val query = title.trim()
+        if (query.isEmpty()) return null
+        return runCatching {
+            withTimeout(TIMEOUT_MS) {
+                val response = client.get("https://movie.douban.com/j/subject_suggest") {
+                    url { parameters.append("q", query) }
+                    headers.append("User-Agent", USER_AGENT)
+                    headers.append("Referer", "https://movie.douban.com/")
+                }
+                if (response.status.value !in 200..299) return@withTimeout null
+                val candidate = pickBest(parseSuggest(response.bodyAsText()), query) ?: return@withTimeout null
+                val base = DoubanDetail(
+                    id = candidate.id,
+                    title = candidate.title,
+                    cover = candidate.cover,
+                    year = candidate.episodesInfo
+                        .split(" · ")
+                        .firstOrNull { it.matches(Regex("\\d{4}")) }
+                        .orEmpty(),
+                    url = candidate.url,
+                )
+                fetchAbstract(candidate.id)?.let { base.copy(
+                    rate = it.rate,
+                    subtype = it.subtype,
+                    directors = it.directors,
+                    actors = it.actors,
+                    duration = it.duration,
+                    region = it.region,
+                    types = it.types,
+                    comment = it.comment,
+                    year = it.year.ifBlank { base.year },
+                    url = it.url.ifBlank { base.url },
+                ) } ?: base
+            }
+        }.getOrNull()
+    }
+
+    /** suggest 结果里挑最贴近查询片名的一条：完全同名 > 互相包含 > 第一条。 */
+    private fun pickBest(candidates: List<DoubanSubject>, query: String): DoubanSubject? {
+        if (candidates.isEmpty()) return null
+        val q = normalize(query)
+        return candidates.firstOrNull { normalize(it.title) == q }
+            ?: candidates.firstOrNull {
+                val t = normalize(it.title)
+                t.contains(q) || (q.length >= 3 && q.contains(t))
+            }
+            ?: candidates.firstOrNull()
+    }
+
+    private fun normalize(text: String): String =
+        text.trim().lowercase().replace(Regex("[\\s·:：·—\\-()（）\\[\\]]"), "")
+
+    /** subject_abstract 只取成功状态（r == 0）的 subject 对象。 */
+    private suspend fun fetchAbstract(id: String): DoubanDetail? {
+        if (id.isBlank()) return null
+        val response = client.get("https://movie.douban.com/j/subject_abstract") {
+            url { parameters.append("subject_id", id) }
+            headers.append("User-Agent", USER_AGENT)
+            headers.append("Referer", "https://movie.douban.com/")
+        }
+        if (response.status.value !in 200..299) return null
+        return parseAbstract(response.bodyAsText())
+    }
+
+    private fun parseAbstract(body: String): DoubanDetail? {
+        val root = runCatching { Json.parseToJsonElement(body).jsonObject }.getOrNull()
+            ?: return null
+        if ((root["r"] as? JsonPrimitive)?.content != "0") return null
+        val obj = root["subject"] as? JsonObject ?: return null
+        val comment = obj["short_comment"] as? JsonObject
+        return DoubanDetail(
+            id = obj.str("id"),
+            rate = obj.str("rate"),
+            subtype = obj.str("subtype"),
+            directors = obj.strArray("directors"),
+            actors = obj.strArray("actors"),
+            duration = obj.str("duration"),
+            region = obj.str("region"),
+            types = obj.strArray("types"),
+            comment = comment?.str("content").orEmpty(),
+            year = obj.str("release_year"),
+            url = obj.str("url"),
+        )
+    }
+
+    private fun JsonObject.strArray(key: String): List<String> =
+        (get(key) as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.content?.takeIf { s -> s.isNotBlank() } }
 
     /** suggest 接口返回 `img` / `sub_title` / `year`，字段名和榜单接口不一样，单独解析。 */
     private fun parseSuggest(body: String): List<DoubanSubject> {
