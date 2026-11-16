@@ -73,6 +73,7 @@ import com.starpick.app.ui.component.SectionHeader
 import com.starpick.app.ui.theme.Accent
 import com.starpick.app.ui.theme.Ink
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -88,6 +89,11 @@ fun DetailScreen(
     container: AppContainer,
     group: SearchGroup,
     initialPlay: WatchProgress? = null,
+    /**
+     * 非空时在后台按这个片名补齐其余源：入口只带了一条记录（历史 / 收藏）或只等到
+     * 第一个命中的源时，页面先开出来，剩下的源随后补进列表，不必干等好几秒。
+     */
+    enrichTitle: String? = null,
     onBack: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
@@ -109,6 +115,9 @@ fun DetailScreen(
         return
     }
 
+    // 源列表独立成一个可变状态：后台补齐时只换这一份，不动 selected / playing 等，
+    // 正在播放或已选好线路不会被重置。
+    var items by remember(group) { mutableStateOf(group.items) }
     var selected by remember(group) { mutableStateOf(group.items.first()) }
     var resolved by remember(group) { mutableStateOf(group.items.first()) }
     var favorite by remember(group) { mutableStateOf(false) }
@@ -151,6 +160,26 @@ fun DetailScreen(
             val episodeIndex = initialPlay.episodeIndex.coerceIn(0, (episodeCount - 1).coerceAtLeast(0))
             lineIndex = groupIndex
             playing = PlayTarget(base, groupIndex, episodeIndex)
+        }
+    }
+
+    // 入口只带了一条记录（历史 / 收藏）或只等到第一个命中的源时，这里在后台把其余源补齐。
+    // 只更新源列表，不动 selected / 线路 / 播放状态，避免补源时把正在看的进度重置。
+    LaunchedEffect(enrichTitle) {
+        val keyword = enrichTitle ?: return@LaunchedEffect
+        val enabled = container.store.sources.value.filter { it.enabled }
+        if (enabled.isEmpty()) return@LaunchedEffect
+        container.aggregator.progressive(enabled, keyword).collect { outcome ->
+            val target = pickGroup(outcome.groups.orEmpty(), selected) ?: return@collect
+            if (target.items.size <= items.size) return@collect
+            items = target.items
+            // 当前源的字段可能被新结果补全（如封面/简介），值不同才换引用，
+            // 值相同不换，避免白白重启下面的 LaunchedEffect(selected) 把线路重置。
+            val current = target.items.firstOrNull { it.key == selected.key }
+            if (current != null && current != selected && playing == null) {
+                selected = current
+                resolved = current
+            }
         }
     }
 
@@ -327,7 +356,7 @@ fun DetailScreen(
                 }
 
                 // ── 底部：视频源及源相关信息。
-                item { SectionHeader(title = "视频源", trailing = "${group.items.size} 个") }
+                item { SectionHeader(title = "视频源", trailing = "${items.size} 个") }
                 item {
                     Row(
                         modifier = Modifier
@@ -335,7 +364,7 @@ fun DetailScreen(
                             .padding(horizontal = 20.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        group.items.forEach { item ->
+                        items.forEach { item ->
                             LineChip(
                                 text = item.sourceName,
                                 selected = item.key == selected.key,

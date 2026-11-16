@@ -29,21 +29,19 @@ import androidx.compose.ui.unit.dp
 import com.starpick.app.AppContainer
 import com.starpick.app.core.model.SearchGroup
 import com.starpick.app.core.model.VodItem
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.flow.mapNotNull
 
 /**
- * 从豆瓣条目 / 观看历史到详情页的过渡：拿片名到用户已启用的 CMS 源里聚合搜索，
- * 命中即进入详情，无源/无结果时给出可操作提示。
+ * 从豆瓣条目到详情页的过渡：拿片名到用户已启用的 CMS 源里聚合搜索。
  *
- * [fallbackItem] 来自观看历史：解析失败时用它单源兜底（总比进不去详情好），
- * 解析成功时优先选中包含它的那一组，避免同名不同片被串到别的条目上。
+ * 只等第一个命中的源，不等齐全部（单源最长 8 秒，等齐要好几秒），
+ * 剩余源交给详情页在后台继续补齐。
  */
 @Composable
 fun ResolvingScreen(
     container: AppContainer,
     title: String,
-    fallbackItem: VodItem? = null,
     onResolved: (SearchGroup) -> Unit,
     onBack: () -> Unit,
 ) {
@@ -59,24 +57,11 @@ fun ResolvingScreen(
             return@LaunchedEffect
         }
         state = ResolveState.Loading
-        val outcome = withContext(Dispatchers.IO) {
-            container.aggregator.grouped(enabled, title)
-        }
-        val groups = outcome.groups.orEmpty()
-        // 从历史进来时优先命中记录里那个源所在的组，保证打开的是同一部片。
-        val matched = fallbackItem?.let { fb ->
-            groups.firstOrNull { group ->
-                group.items.any { it.sourceId == fb.sourceId && it.vodId == fb.vodId }
-            }
-        }
-        val best = matched ?: groups.maxByOrNull { it.items.size }
-        state = when {
-            best != null -> ResolveState.Done(best)
-            // 源里搜不到时退回记录里那一条，其余照常展示（至少还能播）。
-            fallbackItem != null ->
-                ResolveState.Done(SearchGroup(fallbackItem.title, listOf(fallbackItem)))
-            else -> ResolveState.NotFound
-        }
+        // 拿到第一个命中的源就进详情，不再等齐所有源。
+        val best = container.aggregator.progressive(enabled, title)
+            .mapNotNull { outcome -> pickGroup(outcome.groups.orEmpty()) }
+            .firstOrNull()
+        state = if (best != null) ResolveState.Done(best) else ResolveState.NotFound
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -144,6 +129,19 @@ fun ResolvingScreen(
             }
         }
     }
+}
+
+/**
+ * 从一批分组里挑出要展示的那一组：优先包含 [preferred] 那个源的组（避免同名不同片
+ * 串到别的条目上），否则取源最多的一组。
+ */
+internal fun pickGroup(groups: List<SearchGroup>, preferred: VodItem? = null): SearchGroup? {
+    val matched = preferred?.let { fb ->
+        groups.firstOrNull { group ->
+            group.items.any { it.sourceId == fb.sourceId && it.vodId == fb.vodId }
+        }
+    }
+    return matched ?: groups.maxByOrNull { it.items.size }
 }
 
 private sealed interface ResolveState {
