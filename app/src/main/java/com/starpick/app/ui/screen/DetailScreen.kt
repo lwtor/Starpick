@@ -144,10 +144,13 @@ fun DetailScreen(
         if (matched != null) selected = matched
         container.store.rememberItem(base)
         if (initialPlay != null) {
-            val count = PlaylistParser.parse(base.playFrom, base.playUrl).size
-            val groupIndex = initialPlay.groupIndex.coerceIn(0, (count - 1).coerceAtLeast(0))
+            // 换到别的源时线路/集数可能都比记录少，两个下标都要 clamp，否则会黑屏。
+            val lines = PlaylistParser.parse(base.playFrom, base.playUrl)
+            val groupIndex = initialPlay.groupIndex.coerceIn(0, (lines.size - 1).coerceAtLeast(0))
+            val episodeCount = lines.getOrNull(groupIndex)?.episodes?.size ?: 0
+            val episodeIndex = initialPlay.episodeIndex.coerceIn(0, (episodeCount - 1).coerceAtLeast(0))
             lineIndex = groupIndex
-            playing = PlayTarget(base, groupIndex, initialPlay.episodeIndex)
+            playing = PlayTarget(base, groupIndex, episodeIndex)
         }
     }
 

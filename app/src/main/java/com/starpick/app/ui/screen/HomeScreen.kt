@@ -42,7 +42,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.starpick.app.AppContainer
-import com.starpick.app.core.model.SearchGroup
 import com.starpick.app.core.model.VodItem
 import com.starpick.app.core.model.WatchProgress
 import com.starpick.app.ui.component.EmptyState
@@ -88,7 +87,8 @@ class HomeUiState {
 fun HomeScreen(
     container: AppContainer,
     state: HomeUiState,
-    onOpen: (SearchGroup) -> Unit,
+    /** 收藏条目也按片名聚合一次，详情页才能列出所有可用源。 */
+    onOpen: (VodItem) -> Unit,
     onResume: (VodItem, WatchProgress) -> Unit,
     onOpenSettings: () -> Unit,
 ) {
@@ -238,7 +238,7 @@ fun HomeScreen(
                                     cover = fav.cover,
                                     subtitle = fav.remark.takeIf { it.isNotBlank() },
                                     modifier = itemModifier,
-                                    onClick = { onOpen(SearchGroup(fav.title, listOf(fav))) },
+                                    onClick = { onOpen(fav) },
                                 )
                             }
                         }

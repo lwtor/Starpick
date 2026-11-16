@@ -67,7 +67,18 @@ sealed interface Screen {
     /** 独立搜索页：只查豆瓣条目，与底部「搜索」（查采集源）分工不同。 */
     data object DiscoverSearch : Screen
     data class Detail(val group: SearchGroup, val initialPlay: WatchProgress? = null) : Screen
-    data class Resolving(val title: String) : Screen
+
+    /**
+     * 按片名聚合解析出多源分组后再进详情。
+     *
+     * [progress] / [fallback] 是从观看历史进入时带的：前者用于进入后直接续播，
+     * 后者是记录里那条源条目，解析失败时用它兜底，避免点历史反而进不去。
+     */
+    data class Resolving(
+        val title: String,
+        val progress: WatchProgress? = null,
+        val fallback: VodItem? = null,
+    ) : Screen
 }
 
 private data class TabSpec(
@@ -132,10 +143,13 @@ fun StarpickNav(container: AppContainer) {
         is Screen.Resolving -> ResolvingScreen(
             container = container,
             title = current.title,
+            fallbackItem = current.fallback,
             // 必须「替换」而不是「压栈」：过渡页只负责解析片名，解析完就不该留在返回栈里。
             // 之前是 add，导致详情页返回后回落到 Resolving，它又会重新解析并再次推开详情，
             // 表现出来就是「详情页返回不了」。
-            onResolved = { group -> stack[stack.lastIndex] = Screen.Detail(group) },
+            onResolved = { group ->
+                stack[stack.lastIndex] = Screen.Detail(group, current.progress)
+            },
             onBack = pop,
         )
 
@@ -165,8 +179,9 @@ fun StarpickNav(container: AppContainer) {
                             container = container,
                             state = discoverState,
                             onPick = { title -> stack.add(Screen.Resolving(title)) },
+                            // 历史也走一次聚合解析：否则只有记录里那一个源，换个源就没法看。
                             onResume = { item, record ->
-                                stack.add(Screen.Detail(SearchGroup(item.title, listOf(item)), record))
+                                stack.add(Screen.Resolving(item.title, record, item))
                             },
                             // 顶栏搜索图标 → 独立的豆瓣搜索页；底部「搜索」tab 保持搜采集源。
                             onOpenSearch = { stack.add(Screen.DiscoverSearch) },
@@ -176,9 +191,9 @@ fun StarpickNav(container: AppContainer) {
                         Screen.Home -> HomeScreen(
                             container = container,
                             state = homeState,
-                            onOpen = { stack.add(Screen.Detail(it)) },
+                            onOpen = { item -> stack.add(Screen.Resolving(item.title, fallback = item)) },
                             onResume = { item, record ->
-                                stack.add(Screen.Detail(SearchGroup(item.title, listOf(item)), record))
+                                stack.add(Screen.Resolving(item.title, record, item))
                             },
                             onOpenSettings = { goTab(Screen.Settings) },
                         )
