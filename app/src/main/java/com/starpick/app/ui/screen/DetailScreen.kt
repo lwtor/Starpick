@@ -81,7 +81,7 @@ fun DetailScreen(
     onPlay: (VodItem, Int, Int) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    val sources by container.store.sources.collectAsState(initial = emptyList())
+    val sources by container.store.sources.collectAsState()
 
     // 防御：SearchGroup.items 理论非空，空值时给空态而非崩溃。
     if (group.items.isEmpty()) {

@@ -42,7 +42,7 @@ fun ResolvingScreen(
     onResolved: (SearchGroup) -> Unit,
     onBack: () -> Unit,
 ) {
-    val sources by container.store.sources.collectAsState(initial = emptyList())
+    val sources by container.store.sources.collectAsState()
     var state by remember(title) {
         mutableStateOf<ResolveState>(ResolveState.Loading)
     }

@@ -115,9 +115,9 @@ fun DiscoverScreen(
     onOpenSearch: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
-    val sources by container.store.sources.collectAsState(initial = emptyList())
-    val progress by container.store.progress.collectAsState(initial = emptyList())
-    val recent by container.store.recent.collectAsState(initial = emptyList())
+    val sources by container.store.sources.collectAsState()
+    val progress by container.store.progress.collectAsState()
+    val recent by container.store.recent.collectAsState()
 
     val subjects = state.subjects
     val loading = state.loading
@@ -132,7 +132,10 @@ fun DiscoverScreen(
      */
     val load: (Boolean) -> Unit = { force ->
         val tab = state.tabIndex
-        if (!state.loading && (force || state.loadedTab != tab)) {
+        // 没有采集源时首页只显示引导页，拉豆瓣榜单纯属浪费流量。
+        if (sources.isEmpty()) {
+            // no-op：等用户配好源、页面重组时会重新走一次。
+        } else if (!state.loading && (force || state.loadedTab != tab)) {
             state.loading = true
             state.refreshing = force
             state.error = null

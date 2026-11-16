@@ -1,126 +1,100 @@
 package com.starpick.app.ui.component
 
-import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.material3.Card
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.CloudDownload
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import com.starpick.app.AppContainer
-import com.starpick.app.BuildConfig
-import dev.veneranative.updater.InstallResult
-import dev.veneranative.updater.UpdateStatus
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import com.starpick.app.UpdateUiState
+import com.starpick.app.ui.theme.Accent
+import com.starpick.app.ui.theme.Ink
 
 /**
- * 自升级入口卡片。真相源是 [AppContainer.updater.status]，
- * 启动时 [AppContainer.startUpdateCheck] 已静默检查 + 预下载：
- *   - Downloaded：直接给「安装」
- *   - UpdateAvailable：预下载没成功（网络问题等），给「重试下载」
+ * 片匣顶部的更新提示条。
+ *
+ * 只做「告知 + 指路」，不在这里下载：下载进度和安装确认都集中在
+ * 「设置 → 版本更新」一处，避免同一个动作有两套进度显示。
+ * 状态源和设置页是同一个（[AppContainer.update]），两处永远一致。
  */
 @Composable
-fun UpdateCard(container: AppContainer) {
-    val status by container.updater.status.collectAsState()
-    val scope = rememberCoroutineScope()
-    var busy by remember { mutableStateOf(false) }
-    var message by remember { mutableStateOf<String?>(null) }
+fun UpdateCard(container: AppContainer, onOpenSettings: () -> Unit) {
+    val state by container.update.collectAsState()
 
-    when (val s = status) {
-        UpdateStatus.Idle -> Unit
-
-        is UpdateStatus.UpdateAvailable -> UpdateBanner(
-            title = "发现新版本",
-            subtitle = message ?: "code ${s.versionCode}，尚未下载",
-            actionLabel = "下载",
-            busy = busy,
-            onAction = {
-                scope.launch {
-                    busy = true
-                    // checkAndPrefetch 里的 APK 下载是阻塞 IO，必须在 IO 线程执行，
-                    // 否则 25MB 下载会卡死主线程导致页面无响应。
-                    withContext(Dispatchers.IO) {
-                        container.updater.checkAndPrefetch(BuildConfig.VERSION_CODE.toLong())
-                    }
-                    busy = false
-                }
-            },
+    val banner = when (val s = state) {
+        is UpdateUiState.Available -> Triple(
+            "发现新版本 ${s.tag}",
+            "去「设置 → 版本更新」下载",
+            Accent.Gold,
         )
 
-        is UpdateStatus.Downloaded -> UpdateBanner(
-            title = "新版本已就绪",
-            subtitle = message ?: "code ${s.versionCode}，可安装",
-            actionLabel = "安装",
-            busy = busy,
-            onAction = {
-                scope.launch {
-                    busy = true
-                    // install 会弹系统安装器，属于轻量操作，主线程即可。
-                    when (val r = container.updater.install(s.apkFile)) {
-                        InstallResult.Launched -> message = "已交给系统安装器，请确认"
-                        is InstallResult.Failure -> message = "安装失败：${r.message}"
-                    }
-                    busy = false
-                }
-            },
+        is UpdateUiState.Downloading -> Triple(
+            "正在下载新版本",
+            s.fraction?.let { "已完成 ${(it * 100).toInt()}%，可在设置里查看" } ?: "可在设置里查看进度",
+            Accent.Brand,
         )
-    }
-}
 
-@Composable
-private fun UpdateBanner(
-    title: String,
-    subtitle: String,
-    actionLabel: String,
-    busy: Boolean,
-    onAction: () -> Unit,
-) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-                Text(
-                    text = subtitle,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Spacer(Modifier.width(8.dp))
-            if (busy) {
-                CircularProgressIndicator(
-                    modifier = Modifier.width(24.dp).height(24.dp),
-                    strokeWidth = 2.dp,
-                )
-            } else {
-                TextButton(onClick = onAction) { Text(actionLabel) }
-            }
+        is UpdateUiState.Ready -> Triple(
+            "新版本已下载",
+            "去「设置 → 版本更新」安装",
+            Accent.Gold,
+        )
+
+        else -> null
+    } ?: return
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 8.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Ink.Raised)
+            .clickable(onClick = onOpenSettings)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = Icons.Filled.CloudDownload,
+            contentDescription = null,
+            tint = banner.third,
+            modifier = Modifier.size(18.dp),
+        )
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = banner.first,
+                style = MaterialTheme.typography.labelLarge,
+                color = Ink.Text1,
+            )
+            Text(
+                text = banner.second,
+                style = MaterialTheme.typography.labelSmall,
+                color = Ink.Text3,
+            )
         }
+        Icon(
+            imageVector = Icons.Filled.ChevronRight,
+            contentDescription = null,
+            tint = Ink.Text3,
+            modifier = Modifier.size(18.dp),
+        )
     }
 }

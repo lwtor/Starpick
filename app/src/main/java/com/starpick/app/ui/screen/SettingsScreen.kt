@@ -47,11 +47,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.starpick.app.AppContainer
 import com.starpick.app.BuildConfig
+import com.starpick.app.UpdateUiState
 import com.starpick.app.core.model.SourceSite
 import com.starpick.app.ui.component.GhostButton
 import com.starpick.app.ui.component.PrimaryButton
@@ -73,7 +75,7 @@ import kotlinx.coroutines.withContext
  */
 @Composable
 fun SettingsScreen(container: AppContainer) {
-    val sources by container.store.sources.collectAsState(initial = emptyList())
+    val sources by container.store.sources.collectAsState()
     val scope = rememberCoroutineScope()
     var showAddSheet by remember { mutableStateOf(false) }
 
@@ -369,24 +371,40 @@ private fun SourceRow(
     }
 }
 
-/** 版本行：状态文案 + 检查/安装按钮，全部内联，不新开弹窗。 */
+/**
+ * 版本更新行：检查 → 下载（实时进度条）→ 安装，一条链路全部内联，不打弹窗。
+ *
+ * 进度不是转圈猜的：下载走库的流式接口，每 256 KB 回填一次字节数，
+ * 所以能看到「45% · 11.2 / 24.4 MB」这种真实读数。
+ */
 @Composable
 private fun VersionRow(container: AppContainer) {
-    val scope = rememberCoroutineScope()
-    val status by container.updater.status.collectAsState()
-    var busy by remember { mutableStateOf(false) }
-    var message by remember { mutableStateOf<String?>(null) }
+    val state by container.update.collectAsState()
+    var installError by remember { mutableStateOf<String?>(null) }
 
-    val downloaded = status as? UpdateStatus.Downloaded
-    val available = status as? UpdateStatus.UpdateAvailable
+    val statusText = when (val s = state) {
+        UpdateUiState.Idle -> "点右侧检查是否有新版本"
+        UpdateUiState.Checking -> "正在检查…"
+        is UpdateUiState.UpToDate -> "已是最新版本（${s.tag}）"
+        is UpdateUiState.Available -> "发现新版本 ${s.tag}"
+        is UpdateUiState.Downloading -> buildString {
+            append("正在下载 ")
+            append(s.fraction?.let { "${(it * 100).toInt()}%" } ?: "…")
+            if (s.totalBytes != null && s.totalBytes > 0) {
+                append(" · ")
+                append(formatMegabytes(s.bytes))
+                append(" / ")
+                append(formatMegabytes(s.totalBytes))
+            }
+        }
 
-    val statusText = when {
-        downloaded != null -> "新版本已下载，点「安装」"
-        busy -> "正在检查…"
-        message != null -> message!!
-        available != null -> "发现新版本，点「下载」"
-        else -> "尚未检查"
+        is UpdateUiState.Ready -> "新版本已下载，点「安装」"
+        is UpdateUiState.Failed -> "失败：${s.message}"
     }
+
+    val accentStatus = state is UpdateUiState.Available ||
+        state is UpdateUiState.Ready ||
+        state is UpdateUiState.Downloading
 
     Column {
         Row(
@@ -412,58 +430,102 @@ private fun VersionRow(container: AppContainer) {
                 Text(
                     text = statusText,
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (downloaded != null || available != null) Accent.Brand else Ink.Text3,
+                    color = when {
+                        state is UpdateUiState.Failed -> WarnColor
+                        accentStatus -> Accent.Gold
+                        else -> Ink.Text3
+                    },
                 )
             }
             Spacer(Modifier.width(10.dp))
-            if (busy) {
-                CircularProgressIndicator(
+            when (val s = state) {
+                UpdateUiState.Idle -> GhostButton(
+                    text = "检查更新",
+                    modifier = Modifier.height(34.dp),
+                    onClick = { container.checkUpdate() },
+                )
+
+                UpdateUiState.Checking -> CircularProgressIndicator(
                     color = Accent.Brand,
                     strokeWidth = 2.dp,
                     modifier = Modifier.size(18.dp),
                 )
-            } else if (downloaded != null) {
-                PrimaryButton(text = "安装", modifier = Modifier.height(34.dp)) {
-                    when (val r = container.updater.install(downloaded.apkFile)) {
-                        InstallResult.Launched -> message = "已交给系统安装器"
-                        is InstallResult.Failure -> message = "安装失败：${r.message}"
-                    }
-                }
-            } else {
-                GhostButton(
-                    text = if (available != null) "下载" else "检查更新",
+
+                is UpdateUiState.UpToDate -> GhostButton(
+                    text = "重新检查",
                     modifier = Modifier.height(34.dp),
-                ) {
-                    busy = true
-                    message = null
-                    scope.launch {
-                        val result = withContext(Dispatchers.IO) {
-                            runCatching {
-                                container.updater.check(BuildConfig.VERSION_CODE.toLong())
-                            }
-                        }
-                        when (val check = result.getOrNull()) {
-                            is UpdateCheck.Available -> {
-                                // 不在前台等 25 MB 下载完，交给后台任务跑，进度经 status 回流。
-                                container.startUpdateCheck()
-                                message = "已开始后台下载，完成后这里会出现「安装」"
-                            }
+                    onClick = { container.checkUpdate() },
+                )
 
-                            is UpdateCheck.UpToDate ->
-                                message = "已是最新版本（${check.release.tagName}）"
+                is UpdateUiState.Available -> PrimaryButton(
+                    text = "下载",
+                    modifier = Modifier.height(34.dp),
+                    onClick = { container.downloadUpdate(s.versionCode, s.asset) },
+                )
 
-                            UpdateCheck.NoInstallableAsset -> message = "最新发布里没有 APK"
-                            null -> message = "检查失败：" +
-                                (result.exceptionOrNull()?.message ?: "网络异常")
+                is UpdateUiState.Downloading -> Text(
+                    text = s.fraction?.let { "${(it * 100).toInt()}%" } ?: "…",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = Accent.Gold,
+                    fontWeight = FontWeight.Bold,
+                )
+
+                is UpdateUiState.Ready -> PrimaryButton(
+                    text = "安装",
+                    modifier = Modifier.height(34.dp),
+                    onClick = {
+                        when (val r = container.installUpdate(s.file)) {
+                            InstallResult.Launched -> installError = null
+                            is InstallResult.Failure -> installError = "安装失败：${r.message}"
                         }
-                        busy = false
-                    }
-                }
+                    },
+                )
+
+                is UpdateUiState.Failed -> GhostButton(
+                    text = "重试",
+                    modifier = Modifier.height(34.dp),
+                    onClick = { container.checkUpdate() },
+                )
             }
         }
+
+        val downloading = state as? UpdateUiState.Downloading
+        if (downloading != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 46.dp, end = 16.dp, bottom = 12.dp)
+                    .height(4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(Ink.Line),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth((downloading.fraction ?: 0f).coerceIn(0f, 1f))
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(Accent.Gold),
+                )
+            }
+        }
+
+        installError?.let { message ->
+            Text(
+                text = message,
+                style = MaterialTheme.typography.labelSmall,
+                color = WarnColor,
+                modifier = Modifier.padding(start = 46.dp, end = 16.dp, bottom = 10.dp),
+            )
+        }
+
         HorizontalDivider(modifier = Modifier.padding(start = 46.dp), thickness = 1.dp, color = Ink.Line)
     }
 }
+
+private fun formatMegabytes(bytes: Long): String =
+    "%.1f MB".format(bytes / 1024.0 / 1024.0)
+
+private val WarnColor = Color(0xFFFF6B6B)
 
 /** 添加采集源：底部弹层，只填域名，路径自动补全。 */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)

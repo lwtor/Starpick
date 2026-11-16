@@ -125,7 +125,7 @@ internal class ApkDownloader(
             val code = it.code
             if (code != 200 && code != 206) throw DownloadException("download failed with HTTP $code")
 
-            val body = it.body ?: throw DownloadException("download returned an empty body")
+            val body = it.body
             val totalBytes = parseTotalBytes(it.header("Content-Range"), body.contentLength())
             // The server may ignore our range and send the whole file (200): restart from zero.
             val offset = if (code == 206) startBytes else 0L

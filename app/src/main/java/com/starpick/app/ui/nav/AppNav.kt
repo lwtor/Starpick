@@ -147,6 +147,7 @@ fun StarpickNav(container: AppContainer) {
                                     Screen.Player(item, record.groupIndex, record.episodeIndex),
                                 )
                             },
+                            onOpenSettings = { goTab(Screen.Settings) },
                         )
 
                         Screen.Search -> SearchScreen(

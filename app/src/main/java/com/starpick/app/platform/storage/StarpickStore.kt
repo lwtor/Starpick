@@ -7,9 +7,9 @@ import com.starpick.app.core.model.WatchProgress
 import com.starpick.app.core.repository.LibraryRepository
 import com.starpick.app.core.repository.SourceRepository
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -36,11 +36,24 @@ class StarpickStore(context: Context) : SourceRepository, LibraryRepository {
     private val mutex = Mutex()
     private val state = MutableStateFlow(load())
 
-    override val sources: Flow<List<SourceSite>> = state.map { it.sources }
-    override val favorites: Flow<List<VodItem>> = state.map { it.favorites }
-    override val progress: Flow<List<WatchProgress>> =
-        state.map { snapshot -> snapshot.progress.sortedByDescending { it.updatedAt } }
-    val recent: Flow<List<VodItem>> = state.map { it.recent }
+    /**
+     * 对外暴露 StateFlow 而不是 Flow.map：
+     *
+     * 普通 Flow + `collectAsState(initial = emptyList())` 的首帧一定取 initial，第二帧才拿到真实值，
+     * 于是每个页面都会先渲染一次「没有可用的采集源 / 片匣是空的」再跳成正常内容。
+     * StateFlow 可以让 Compose 用它的 value 当首帧，从根上消掉这次闪烁。
+     */
+    private val _sources = MutableStateFlow(state.value.sources)
+    private val _favorites = MutableStateFlow(state.value.favorites)
+    private val _progress = MutableStateFlow(state.value.progress.sortedByDescending { it.updatedAt })
+    private val _recent = MutableStateFlow(state.value.recent)
+    private val _searchHistory = MutableStateFlow(state.value.searchHistory)
+
+    override val sources: StateFlow<List<SourceSite>> = _sources.asStateFlow()
+    override val favorites: StateFlow<List<VodItem>> = _favorites.asStateFlow()
+    override val progress: StateFlow<List<WatchProgress>> = _progress.asStateFlow()
+    val recent: StateFlow<List<VodItem>> = _recent.asStateFlow()
+    val searchHistory: StateFlow<List<String>> = _searchHistory.asStateFlow()
 
     override suspend fun add(name: String, baseUrl: String) {
         val site = SourceSite(
@@ -97,14 +110,39 @@ class StarpickStore(context: Context) : SourceRepository, LibraryRepository {
         snapshot.copy(progress = snapshot.progress.filterNot { it.key == key })
     }
 
+    /** 搜索历史：最近搜过的排前面，重复关键词去重后提升到首位。 */
+    suspend fun addSearchHistory(keyword: String) {
+        val key = keyword.trim()
+        if (key.isEmpty()) return
+        mutate { snapshot ->
+            snapshot.copy(
+                searchHistory = (
+                    listOf(key) + snapshot.searchHistory.filterNot { it.equals(key, ignoreCase = true) }
+                    ).take(SEARCH_HISTORY_LIMIT),
+            )
+        }
+    }
+
+    suspend fun clearSearchHistory() = mutate { it.copy(searchHistory = emptyList()) }
+
     private suspend fun mutate(transform: (State) -> State) {
         mutex.withLock {
             val next = transform(state.value)
             state.value = next
+            publish(next)
             withContext(Dispatchers.IO) {
                 file.writeText(next.toJson().toString())
             }
         }
+    }
+
+    /** 内存状态变更后同步刷新对外的 StateFlow，保证 UI 立刻拿到新值。 */
+    private fun publish(snapshot: State) {
+        _sources.value = snapshot.sources
+        _favorites.value = snapshot.favorites
+        _progress.value = snapshot.progress.sortedByDescending { it.updatedAt }
+        _recent.value = snapshot.recent
+        _searchHistory.value = snapshot.searchHistory
     }
 
     private fun load(): State = runCatching {
@@ -118,6 +156,7 @@ class StarpickStore(context: Context) : SourceRepository, LibraryRepository {
         val favorites: List<VodItem> = emptyList(),
         val progress: List<WatchProgress> = emptyList(),
         val recent: List<VodItem> = emptyList(),
+        val searchHistory: List<String> = emptyList(),
     )
 
     private fun State.toJson(): JsonObject = buildJsonObject {
@@ -125,6 +164,7 @@ class StarpickStore(context: Context) : SourceRepository, LibraryRepository {
         put("favorites", JsonArray(favorites.map { it.toJson() }))
         put("progress", JsonArray(progress.map { it.toJson() }))
         put("recent", JsonArray(recent.map { it.toJson() }))
+        put("searchHistory", JsonArray(searchHistory.map { JsonPrimitive(it) }))
     }
 
     private fun JsonObject.toState(): State = State(
@@ -132,6 +172,9 @@ class StarpickStore(context: Context) : SourceRepository, LibraryRepository {
         favorites = array("favorites").mapNotNull { (it as? JsonObject)?.toVodItem() },
         progress = array("progress").mapNotNull { (it as? JsonObject)?.toProgress() },
         recent = array("recent").mapNotNull { (it as? JsonObject)?.toVodItem() },
+        searchHistory = array("searchHistory")
+            .mapNotNull { (it as? JsonPrimitive)?.content?.takeIf(String::isNotBlank) }
+            .take(SEARCH_HISTORY_LIMIT),
     )
 
     private fun SourceSite.toJson(): JsonObject = buildJsonObject {
@@ -218,5 +261,6 @@ class StarpickStore(context: Context) : SourceRepository, LibraryRepository {
 
     companion object {
         private const val RECENT_LIMIT = 30
+        private const val SEARCH_HISTORY_LIMIT = 12
     }
 }

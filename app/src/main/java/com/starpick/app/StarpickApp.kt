@@ -12,16 +12,46 @@ import com.starpick.app.core.search.SearchAggregator
 import com.starpick.app.platform.createHttpClient
 import com.starpick.app.platform.createOkHttpClient
 import com.starpick.app.platform.storage.StarpickStore
+import dev.veneranative.updater.InstallResult
+import dev.veneranative.updater.ReleaseAsset
 import dev.veneranative.updater.ReleaseVersionResolver
+import dev.veneranative.updater.UpdateCheck
 import dev.veneranative.updater.Updater
 import dev.veneranative.updater.UpdaterConfig
 import dev.veneranative.updater.UpdaterStrings
+import java.io.File
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
+
+/**
+ * 应用内更新的界面状态。自己维护而不是直接用库的 [dev.veneranative.updater.UpdateStatus]：
+ * 后者只有「有更新 / 已下载」两档，没有下载进度，也没法表达「检查中 / 失败原因」。
+ */
+sealed interface UpdateUiState {
+    data object Idle : UpdateUiState
+    data object Checking : UpdateUiState
+    data class UpToDate(val tag: String) : UpdateUiState
+    data class Available(
+        val versionCode: Long,
+        val tag: String,
+        val asset: ReleaseAsset,
+    ) : UpdateUiState
+    data class Downloading(
+        val fraction: Float?,
+        val bytes: Long,
+        val totalBytes: Long?,
+    ) : UpdateUiState
+    data class Ready(val versionCode: Long, val file: File) : UpdateUiState
+    data class Failed(val message: String) : UpdateUiState
+}
 
 class StarpickApp : Application() {
     lateinit var container: AppContainer
@@ -31,7 +61,7 @@ class StarpickApp : Application() {
         super.onCreate()
         configureImageLoader()
         container = AppContainer(this)
-        container.startUpdateCheck()
+        container.checkUpdate()
     }
 
     /**
@@ -107,10 +137,82 @@ class AppContainer(context: Context) {
         httpClient = createOkHttpClient(),
     )
 
-    /** 启动时静默检查 + 预下载，失败不打扰用户，结果经 [updater.status] 暴露。 */
-    fun startUpdateCheck() {
+    /** 进程内记住已下载的包，避免每次进设置页都重新下一遍。 */
+    private var downloadedApk: Pair<Long, File>? = null
+
+    private val _update = MutableStateFlow<UpdateUiState>(UpdateUiState.Idle)
+
+    /** 更新流程的唯一状态源，设置页直接渲染它。 */
+    val update: StateFlow<UpdateUiState> = _update.asStateFlow()
+
+    /**
+     * 检查更新。只查不下载 —— 24 MB 的包不该在用户没同意时静默吃掉。
+     * 任何结果（含失败原因）都写进 [update]，UI 只负责渲染。
+     */
+    fun checkUpdate() {
+        val busy = _update.value is UpdateUiState.Checking ||
+            _update.value is UpdateUiState.Downloading
+        if (busy) return
         appScope.launch {
-            updater.checkAndPrefetch(BuildConfig.VERSION_CODE.toLong())
+            _update.value = UpdateUiState.Checking
+            try {
+                when (val check = updater.check(BuildConfig.VERSION_CODE.toLong())) {
+                    is UpdateCheck.Available -> {
+                        val cached = downloadedApk
+                            ?.takeIf { it.first == check.versionCode }
+                            ?.second
+                            ?.takeIf { it.isFile }
+                            ?: updater.cachedApk(check.versionCode)?.takeIf { it.isFile }
+                        _update.value = if (cached != null) {
+                            UpdateUiState.Ready(check.versionCode, cached)
+                        } else {
+                            UpdateUiState.Available(
+                                versionCode = check.versionCode,
+                                tag = check.release.tagName,
+                                asset = check.asset,
+                            )
+                        }
+                    }
+
+                    is UpdateCheck.UpToDate ->
+                        _update.value = UpdateUiState.UpToDate(check.release.tagName)
+
+                    UpdateCheck.NoInstallableAsset ->
+                        _update.value = UpdateUiState.Failed("最新发布里没有可安装的 APK")
+                }
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                _update.value = UpdateUiState.Failed(error.message ?: "检查失败")
+            }
         }
     }
+
+    /** 下载更新包。走库的流式下载，每 256 KB 把进度回填到 [update]。 */
+    fun downloadUpdate(versionCode: Long, asset: ReleaseAsset) {
+        if (_update.value is UpdateUiState.Downloading) return
+        appScope.launch {
+            _update.value = UpdateUiState.Downloading(
+                fraction = null,
+                bytes = 0L,
+                totalBytes = asset.sizeBytes.takeIf { it > 0 },
+            )
+            try {
+                val file = updater.download(asset) { progress ->
+                    _update.value = UpdateUiState.Downloading(
+                        fraction = progress.fraction,
+                        bytes = progress.bytesDownloaded,
+                        totalBytes = progress.totalBytes,
+                    )
+                }
+                downloadedApk = versionCode to file
+                _update.value = UpdateUiState.Ready(versionCode, file)
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                _update.value = UpdateUiState.Failed(error.message ?: "下载失败")
+            }
+        }
+    }
+
+    /** 交给系统安装器，用户在系统弹窗里确认。 */
+    fun installUpdate(file: File): InstallResult = updater.install(file)
 }

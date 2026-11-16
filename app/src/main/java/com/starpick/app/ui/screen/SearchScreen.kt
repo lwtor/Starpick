@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -70,7 +71,8 @@ fun SearchScreen(
     onOpen: (SearchGroup) -> Unit,
     onOpenSettings: () -> Unit,
 ) {
-    val sources by container.store.sources.collectAsState(initial = emptyList())
+    val sources by container.store.sources.collectAsState()
+    val history by container.store.searchHistory.collectAsState()
     val enabledSources = remember(sources) { sources.filter { it.enabled } }
     val scope = rememberCoroutineScope()
 
@@ -93,6 +95,7 @@ fun SearchScreen(
             loading = true
             outcome = null
             scope.launch {
+                container.store.addSearchHistory(keyword)
                 val started = System.currentTimeMillis()
                 val result = withContext(Dispatchers.IO) {
                     container.aggregator.grouped(enabledSources, keyword)
@@ -192,8 +195,53 @@ fun SearchScreen(
             }
 
             else -> {
-                // 初始态：豆瓣热门榜前 5，点一下就能搜。
+                // 初始态：搜索历史（有才显示）+ 豆瓣热门前 5，点一下就能搜。
                 LazyColumn(contentPadding = PaddingValues(bottom = 12.dp)) {
+                    if (history.isNotEmpty()) {
+                        item {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = "搜索历史",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = Ink.Text1,
+                                )
+                                Spacer(Modifier.weight(1f))
+                                Text(
+                                    text = "清空",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = Ink.Text3,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable {
+                                            scope.launch { container.store.clearSearchHistory() }
+                                        }
+                                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                                )
+                            }
+                        }
+                        item {
+                            FlowRow(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 20.dp, vertical = 6.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                history.forEach { keyword ->
+                                    HistoryChip(text = keyword) {
+                                        query = keyword
+                                        runSearch(keyword)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     item { SectionHeader(title = "大家都在搜", trailing = "豆瓣热门") }
                     items(hot, key = { it.id }) { s ->
                         Row(
@@ -298,6 +346,23 @@ private fun SearchField(
             }
         }
     }
+}
+
+@Composable
+private fun HistoryChip(text: String, onClick: () -> Unit) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelLarge,
+        color = Ink.Text2,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(Ink.Card)
+            .border(1.dp, Ink.Line, RoundedCornerShape(16.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+    )
 }
 
 @Composable

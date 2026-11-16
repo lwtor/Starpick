@@ -49,10 +49,11 @@ fun HomeScreen(
     container: AppContainer,
     onOpen: (SearchGroup) -> Unit,
     onResume: (VodItem, WatchProgress) -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
-    val favorites by container.store.favorites.collectAsState(initial = emptyList())
-    val progress by container.store.progress.collectAsState(initial = emptyList())
-    val recent by container.store.recent.collectAsState(initial = emptyList())
+    val favorites by container.store.favorites.collectAsState()
+    val progress by container.store.progress.collectAsState()
+    val recent by container.store.recent.collectAsState()
 
     var tabIndex by remember { mutableIntStateOf(0) }
 
@@ -63,7 +64,7 @@ fun HomeScreen(
         contentPadding = PaddingValues(bottom = 12.dp),
     ) {
         // 自升级入口：仅在发现新版本或已下载时显示（UpdateCard 内部自行判断）。
-        item { UpdateCard(container) }
+        item { UpdateCard(container, onOpenSettings) }
 
         item {
             Row(
