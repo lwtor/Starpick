@@ -2,6 +2,8 @@ package com.starpick.app
 
 import android.app.Application
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import coil3.ImageLoader
 import coil3.SingletonImageLoader
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
@@ -107,6 +109,9 @@ class AppContainer(context: Context) {
     val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val httpClient = createHttpClient()
 
+    /** 启动外部 Activity（浏览器下载）需要 Context，非 Activity 场景必须带 NEW_TASK。 */
+    private val appContext = context.applicationContext
+
     val store = StarpickStore(context.applicationContext)
     val api = CmsV10Api(httpClient)
     val douban = DoubanApi(httpClient)
@@ -144,6 +149,24 @@ class AppContainer(context: Context) {
     /** 进程内记住已下载的包，避免每次进设置页都重新下一遍。 */
     private var downloadedApk: Pair<Long, File>? = null
 
+    /**
+     * 最近一次检查命中的 APK 资产。
+     *
+     * 应用内下载走 GitHub 的 302 重定向 + API 配额，遇到限流、被拦的运营商网络就会卡住；
+     * 浏览器有完整的重定向与 Cookie 能力，是更稳的兜底，所以这里把资产留一份给外部下载用。
+     */
+    private var latestAsset: ReleaseAsset? = null
+
+    /**
+     * 可交给浏览器的 APK 直链。
+     *
+     * 有检查结果时用 Release 资产的真实地址；检查失败（限流 / 无网络）也退回
+     * `releases/latest/download/<固定名>` —— 这条路径不查 API、永远指向最新发布，
+     * 所以「浏览器下载」在任何状态下都能给出一个能用的链接。
+     */
+    val browserDownloadUrl: String
+        get() = latestAsset?.downloadUrl ?: LATEST_APK_URL
+
     private val _update = MutableStateFlow<UpdateUiState>(UpdateUiState.Idle)
 
     /** 更新流程的唯一状态源，设置页直接渲染它。 */
@@ -162,6 +185,7 @@ class AppContainer(context: Context) {
             try {
                 when (val check = updater.check(BuildConfig.VERSION_CODE.toLong())) {
                     is UpdateCheck.Available -> {
+                        latestAsset = check.asset
                         val cached = downloadedApk
                             ?.takeIf { it.first == check.versionCode }
                             ?.second
@@ -219,4 +243,25 @@ class AppContainer(context: Context) {
 
     /** 交给系统安装器，用户在系统弹窗里确认。 */
     fun installUpdate(file: File): InstallResult = updater.install(file)
+
+    /**
+     * 把 APK 直链交给系统浏览器 / 下载器。
+     *
+     * 应用内下载要从 GitHub 302 到 objects.githubusercontent.com，还会受 API 配额影响，
+     * 某些网络下会卡在 0%（之前就出过）；浏览器自带重定向、断点续传与「下载完成」通知，
+     * 所以这条通道作为兜底，任何更新状态下都能用。
+     *
+     * @return 是否成功唤起（设备没有浏览器时为 false）
+     */
+    fun openDownloadInBrowser(): Boolean {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(browserDownloadUrl))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return runCatching { appContext.startActivity(intent) }.isSuccess
+    }
+
+    private companion object {
+        /** 与 [UpdaterConfig] 里的 owner / repository / fallbackAssetName 保持一致。 */
+        const val LATEST_APK_URL =
+            "https://github.com/lwtor/Starpick/releases/latest/download/Starpick.apk"
+    }
 }

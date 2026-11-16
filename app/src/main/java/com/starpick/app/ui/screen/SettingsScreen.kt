@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.OpenInBrowser
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -402,7 +403,16 @@ private fun SourceRow(
 @Composable
 private fun VersionRow(container: AppContainer) {
     val state by container.update.collectAsState()
-    var installError by remember { mutableStateOf<String?>(null) }
+    var actionError by remember { mutableStateOf<String?>(null) }
+
+    // 浏览器兜底：应用内下载走的是 GitHub 的 302 + API 配额，卡住时浏览器是唯一出路。
+    val openInBrowser: () -> Unit = {
+        actionError = if (container.openDownloadInBrowser()) {
+            null
+        } else {
+            "没有找到可用的浏览器，无法外部下载"
+        }
+    }
 
     val statusText = when (val s = state) {
         UpdateUiState.Idle -> "点右侧检查是否有新版本"
@@ -479,11 +489,15 @@ private fun VersionRow(container: AppContainer) {
                     onClick = { container.checkUpdate() },
                 )
 
-                is UpdateUiState.Available -> PrimaryButton(
-                    text = "下载",
-                    modifier = Modifier.height(34.dp),
-                    onClick = { container.downloadUpdate(s.versionCode, s.asset) },
-                )
+                is UpdateUiState.Available -> Row(verticalAlignment = Alignment.CenterVertically) {
+                    BrowserLink(onClick = openInBrowser)
+                    Spacer(Modifier.width(6.dp))
+                    PrimaryButton(
+                        text = "下载",
+                        modifier = Modifier.height(34.dp),
+                        onClick = { container.downloadUpdate(s.versionCode, s.asset) },
+                    )
+                }
 
                 is UpdateUiState.Downloading -> Text(
                     text = s.fraction?.let { "${(it * 100).toInt()}%" } ?: "…",
@@ -497,8 +511,8 @@ private fun VersionRow(container: AppContainer) {
                     modifier = Modifier.height(34.dp),
                     onClick = {
                         when (val r = container.installUpdate(s.file)) {
-                            InstallResult.Launched -> installError = null
-                            is InstallResult.Failure -> installError = "安装失败：${r.message}"
+                            InstallResult.Launched -> actionError = null
+                            is InstallResult.Failure -> actionError = "安装失败：${r.message}"
                         }
                     },
                 )
@@ -531,7 +545,16 @@ private fun VersionRow(container: AppContainer) {
             }
         }
 
-        installError?.let { message ->
+        // 下载中 / 失败时补一条浏览器通道：应用内下载卡住时用户没有别的出路。
+        if (state is UpdateUiState.Downloading || state is UpdateUiState.Failed) {
+            BrowserLink(
+                text = if (state is UpdateUiState.Downloading) "下载太慢？改用浏览器下载" else "改用浏览器下载",
+                modifier = Modifier.padding(start = 42.dp, bottom = 8.dp),
+                onClick = openInBrowser,
+            )
+        }
+
+        actionError?.let { message ->
             Text(
                 text = message,
                 style = MaterialTheme.typography.labelSmall,
@@ -541,6 +564,42 @@ private fun VersionRow(container: AppContainer) {
         }
 
         HorizontalDivider(modifier = Modifier.padding(start = 46.dp), thickness = 1.dp, color = Ink.Line)
+    }
+}
+
+/**
+ * 次级操作：把 APK 直链交给系统浏览器。
+ *
+ * 用文字而不是纯图标，是因为「下不下来」时用户很难猜到图标含义；
+ * 又做成无边框的浅色文字，避免和在右侧的主按钮抢注意力。
+ */
+@Composable
+private fun BrowserLink(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    text: String = "浏览器",
+) {
+    Row(
+        modifier = modifier
+            .height(34.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = Icons.Filled.OpenInBrowser,
+            contentDescription = null,
+            tint = Accent.Brand,
+            modifier = Modifier.size(16.dp),
+        )
+        Spacer(Modifier.width(5.dp))
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelLarge,
+            color = Accent.Brand,
+            maxLines = 1,
+        )
     }
 }
 

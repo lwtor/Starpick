@@ -42,7 +42,7 @@ fun UpdateCard(container: AppContainer, onOpenSettings: () -> Unit) {
     val banner = when (val s = state) {
         is UpdateUiState.Available -> Triple(
             "发现新版本 ${s.tag}",
-            "去「设置 → 版本更新」下载",
+            "可应用内下载，也可用浏览器直接下",
             Accent.Gold,
         )
 
