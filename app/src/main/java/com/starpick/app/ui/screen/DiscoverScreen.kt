@@ -17,11 +17,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -35,6 +36,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -214,30 +216,44 @@ private fun CategoryTabs(selected: HotTab, onSelect: (HotTab) -> Unit) {
     }
 }
 
-/** 英雄轮播：大卡片横向滑动，展示评分与更新状态。 */
+/** 英雄轮播：大卡片横向滑动，展示评分与更新状态。用 LazyRow 实现，稳定可靠。 */
 @Composable
 private fun HeroCarousel(subjects: List<DoubanSubject>, onPick: (String) -> Unit) {
-    val pagerState = rememberPagerState(pageCount = { subjects.size })
+    val listState = rememberLazyListState()
+    var currentIndex by remember { mutableIntStateOf(0) }
 
-    // 自动轮播：每 5 秒滑到下一张，用户手动拖动后重新计时。
-    LaunchedEffect(pagerState) {
+    // 同步指示点：监听滚动位置，把当前可见的第一项当作当前页。
+    LaunchedEffect(listState, subjects.size) {
+        snapshotFlow { listState.firstVisibleItemIndex }
+            .collect { index -> currentIndex = index.coerceIn(0, (subjects.size - 1).coerceAtLeast(0)) }
+    }
+
+    // 自动轮播：每 5 秒滑到下一张；用户手动拖动打断后由 scroll 回调刷新当前位置。
+    LaunchedEffect(listState, subjects.size) {
+        if (subjects.size <= 1) return@LaunchedEffect
         while (true) {
             delay(5_000)
-            if (!pagerState.isScrollInProgress) {
-                val next = (pagerState.currentPage + 1) % subjects.size
-                pagerState.animateScrollToPage(next)
+            if (!listState.isScrollInProgress) {
+                val next = (currentIndex + 1) % subjects.size
+                listState.animateScrollToItem(next)
             }
         }
     }
 
     Column {
-        HorizontalPager(
-            state = pagerState,
+        LazyRow(
+            state = listState,
             modifier = Modifier.fillMaxWidth(),
             contentPadding = PaddingValues(horizontal = 16.dp),
-            pageSpacing = 12.dp,
-        ) { page ->
-            HeroCard(subject = subjects[page], onClick = { onPick(subjects[page].title) })
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            items(subjects, key = { it.id }) { subject ->
+                HeroCard(
+                    subject = subject,
+                    modifier = Modifier.fillParentMaxWidth(0.82f),
+                    onClick = { onPick(subject.title) },
+                )
+            }
         }
 
         Spacer(Modifier.height(10.dp))
@@ -248,7 +264,7 @@ private fun HeroCarousel(subjects: List<DoubanSubject>, onPick: (String) -> Unit
             horizontalArrangement = Arrangement.Center,
         ) {
             subjects.forEachIndexed { index, _ ->
-                val active = index == pagerState.currentPage
+                val active = index == currentIndex
                 Box(
                     modifier = Modifier
                         .padding(horizontal = 3.dp)
@@ -266,11 +282,10 @@ private fun HeroCarousel(subjects: List<DoubanSubject>, onPick: (String) -> Unit
 
 /** 英雄卡片：大图 + 底部渐变遮罩 + 片名 + 评分。 */
 @Composable
-private fun HeroCard(subject: DoubanSubject, onClick: () -> Unit) {
+private fun HeroCard(subject: DoubanSubject, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val shape = RoundedCornerShape(16.dp)
     Box(
-        modifier = Modifier
-            .fillMaxWidth()
+        modifier = modifier
             .aspectRatio(16f / 9f)
             .clip(shape)
             .clickable(onClick = onClick)
