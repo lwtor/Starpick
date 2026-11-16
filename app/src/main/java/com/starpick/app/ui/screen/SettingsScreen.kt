@@ -435,32 +435,16 @@ private fun VersionRow(container: AppContainer) {
         UpdateUiState.Checking -> "正在检查…"
         is UpdateUiState.UpToDate -> "已是最新版本（${s.tag}）"
         is UpdateUiState.Available -> "发现新版本 ${s.tag}"
-        is UpdateUiState.Downloading -> buildString {
-            append("正在下载 ")
-            append(s.fraction?.let { "${(it * 100).toInt()}%" } ?: "…")
-            if (s.totalBytes != null && s.totalBytes > 0) {
-                append(" · ")
-                append(formatMegabytes(s.bytes))
-                append(" / ")
-                append(formatMegabytes(s.totalBytes))
-            }
-            if (s.bytesPerSecond > 0) {
-                append(" · ")
-                append(formatSpeed(s.bytesPerSecond))
-                val remaining = (s.totalBytes ?: 0L) - s.bytes
-                if (remaining > 0) {
-                    val seconds = remaining / s.bytesPerSecond
-                    if (seconds in 1..7200) {
-                        append("，剩 ")
-                        append(formatEta(seconds))
-                    }
-                }
-            }
-        }
-
+        // 百分比单独画在标题行，这里不再重复；网速/剩余时间也去掉，一行放不下还会折行。
+        is UpdateUiState.Downloading -> ""
         is UpdateUiState.Ready -> "新版本已下载，点「安装」"
         is UpdateUiState.Failed -> "失败：${s.message}"
     }
+
+    // 下载中显示在标题右侧的百分比：整个界面只保留这一个。
+    val percent = (state as? UpdateUiState.Downloading)
+        ?.fraction
+        ?.let { (it * 100).toInt() }
 
     val accentStatus = state is UpdateUiState.Available ||
         state is UpdateUiState.Ready ||
@@ -481,21 +465,36 @@ private fun VersionRow(container: AppContainer) {
             )
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(
-                    text = "版本更新",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = Ink.Text1,
-                )
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    text = statusText,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = when {
-                        state is UpdateUiState.Failed -> WarnColor
-                        accentStatus -> Accent.Gold
-                        else -> Ink.Text3
-                    },
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "版本更新",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = Ink.Text1,
+                    )
+                    if (percent != null) {
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "$percent%",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = Accent.Gold,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                }
+                if (statusText.isNotEmpty()) {
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = statusText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = when {
+                            state is UpdateUiState.Failed -> WarnColor
+                            accentStatus -> Accent.Gold
+                            else -> Ink.Text3
+                        },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
             Spacer(Modifier.width(10.dp))
             when (val s = state) {
@@ -527,11 +526,10 @@ private fun VersionRow(container: AppContainer) {
                     )
                 }
 
-                is UpdateUiState.Downloading -> Text(
-                    text = s.fraction?.let { "${(it * 100).toInt()}%" } ?: "…",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = Accent.Gold,
-                    fontWeight = FontWeight.Bold,
+                is UpdateUiState.Downloading -> GhostButton(
+                    text = "取消",
+                    modifier = Modifier.height(34.dp),
+                    onClick = { container.cancelDownload() },
                 )
 
                 is UpdateUiState.Ready -> PrimaryButton(
@@ -576,7 +574,7 @@ private fun VersionRow(container: AppContainer) {
         // 下载中 / 失败时补一条浏览器通道：应用内下载卡住时用户没有别的出路。
         if (state is UpdateUiState.Downloading || state is UpdateUiState.Failed) {
             BrowserLink(
-                text = if (state is UpdateUiState.Downloading) "下载太慢？改用浏览器下载" else "改用浏览器下载",
+                text = "改用浏览器下载",
                 modifier = Modifier.padding(start = 42.dp, bottom = 8.dp),
                 onClick = openInBrowser,
             )
@@ -692,22 +690,6 @@ private fun MediaCacheRow(container: AppContainer) {
             }
         },
     )
-}
-
-private fun formatMegabytes(bytes: Long): String =
-    "%.1f MB".format(bytes / 1024.0 / 1024.0)
-
-/** 下载速度：慢连接下 KB/s 更有信息量，别一律换算成 MB。 */
-private fun formatSpeed(bytesPerSecond: Long): String = when {
-    bytesPerSecond >= 1024L * 1024 -> "%.1f MB/s".format(bytesPerSecond / 1024.0 / 1024.0)
-    bytesPerSecond >= 1024 -> "%.0f KB/s".format(bytesPerSecond / 1024.0)
-    else -> "${bytesPerSecond} B/s"
-}
-
-private fun formatEta(seconds: Long): String = when {
-    seconds < 60 -> "${seconds} 秒"
-    seconds < 3600 -> "${seconds / 60} 分 ${seconds % 60} 秒"
-    else -> "很久"
 }
 
 /** 缓存大小按量级取单位，1 GB 上限显示成「1.0 GB」比「1024 MB」好读。 */

@@ -35,7 +35,9 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -283,7 +285,7 @@ class AppContainer(context: Context) {
                                 versionCode = check.versionCode,
                                 tag = check.release.tagName,
                                 asset = check.asset,
-                            )
+                            ).also { lastAvailable = it }
                         }
                     }
 
@@ -303,11 +305,30 @@ class AppContainer(context: Context) {
     /** 上一次尝试下载的版本与资产，失败后「重试」直接续传，而不是重新检查一遍。 */
     private var lastAttempt: Pair<Long, ReleaseAsset>? = null
 
+    /** 取消后要还原成哪个状态（发现新版本的那一条），避免用户找不到重新下载的入口。 */
+    private var lastAvailable: UpdateUiState.Available? = null
+
+    private var downloadJob: Job? = null
+
+    /**
+     * 下载批次号。
+     *
+     * 下载器在 IO 线程回调进度，而「取消」是在主线程把状态写回去的：两边同时写 `_update`
+     * 会出现「取消了又跳回下载中」。回调里比对批次号，过期批次的进度直接丢弃。
+     */
+    @Volatile
+    private var downloadToken = 0
+
     /** 下载更新包。库内多连接分段下载，进度按时间节流回调（约 300ms 一次）。 */
     fun downloadUpdate(versionCode: Long, asset: ReleaseAsset) {
         if (_update.value is UpdateUiState.Downloading) return
         lastAttempt = versionCode to asset
-        appScope.launch {
+        // 上一轮可能是刚被取消的：等它真正停下再开新一轮，否则两批会同时写同一堆 .part 文件。
+        val previous = downloadJob
+        val token = ++downloadToken
+        downloadJob = appScope.launch {
+            previous?.cancelAndJoin()
+            if (token != downloadToken) return@launch
             _update.value = UpdateUiState.Downloading(
                 fraction = null,
                 bytes = 0L,
@@ -315,6 +336,7 @@ class AppContainer(context: Context) {
             )
             try {
                 val file = updater.download(asset) { progress ->
+                    if (token != downloadToken) return@download
                     _update.value = UpdateUiState.Downloading(
                         fraction = progress.fraction,
                         bytes = progress.bytesDownloaded,
@@ -322,13 +344,28 @@ class AppContainer(context: Context) {
                         bytesPerSecond = progress.bytesPerSecond,
                     )
                 }
+                if (token != downloadToken) return@launch
                 downloadedApk = versionCode to file
                 _update.value = UpdateUiState.Ready(versionCode, file)
             } catch (error: Exception) {
-                if (error is CancellationException) throw error
+                if (error is CancellationException) return@launch
+                if (token != downloadToken) return@launch
                 _update.value = UpdateUiState.Failed(error.message ?: "下载失败")
             }
         }
+    }
+
+    /**
+     * 取消正在进行的下载。
+     *
+     * 已经下好的分段文件留在本地不删：用户过一会儿再点「下载」时是续传，不是从 0 开始。
+     * 这里只置取消标记，不把 job 置空 —— 下一次 [downloadUpdate] 要先 join 它，确认写完再开。
+     */
+    fun cancelDownload() {
+        if (_update.value !is UpdateUiState.Downloading) return
+        downloadToken++
+        downloadJob?.cancel()
+        _update.value = lastAvailable ?: UpdateUiState.Idle
     }
 
     /** 下载失败后的「重试」：续传上次的分段文件，省掉重复的检查与已下载的部分。 */

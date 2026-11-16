@@ -12,7 +12,9 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -301,6 +303,9 @@ internal class ApkDownloader(
                 val source = r.body.source()
                 val buffer = ByteArray(IO_BUFFER_BYTES)
                 while (true) {
+                    // The read itself is blocking and says nothing about cancellation, so a cancel
+                    // would otherwise wait for the whole 6 MB range to finish downloading.
+                    currentCoroutineContext().ensureActive()
                     val read = source.read(buffer)
                     if (read == -1) break
                     out.write(buffer, 0, read)
@@ -390,6 +395,7 @@ internal class ApkDownloader(
                 val buffer = ByteArray(IO_BUFFER_BYTES)
                 var lastReportedAt = System.nanoTime()
                 while (true) {
+                    currentCoroutineContext().ensureActive()
                     val read = source.read(buffer)
                     if (read == -1) break
                     file.write(buffer, 0, read)
