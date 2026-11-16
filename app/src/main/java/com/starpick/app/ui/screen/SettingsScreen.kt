@@ -38,6 +38,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -54,6 +55,7 @@ import androidx.compose.ui.unit.dp
 import com.starpick.app.AppContainer
 import com.starpick.app.BuildConfig
 import com.starpick.app.UpdateUiState
+import com.starpick.app.core.api.SourceHealth
 import com.starpick.app.core.model.SourceSite
 import com.starpick.app.ui.component.GhostButton
 import com.starpick.app.ui.component.PrimaryButton
@@ -115,10 +117,11 @@ fun SettingsScreen(container: AppContainer) {
                             },
                             onPing = { onResult ->
                                 scope.launch {
-                                    val ok = withContext(Dispatchers.IO) {
-                                        runCatching { container.api.ping(site) }.getOrDefault(false)
+                                    val health = withContext(Dispatchers.IO) {
+                                        runCatching { container.api.probe(site) }
+                                            .getOrDefault(SourceHealth.UNKNOWN)
                                     }
-                                    onResult(ok)
+                                    onResult(health)
                                 }
                             },
                             onRemove = { scope.launch { container.store.remove(site.id) } },
@@ -281,11 +284,22 @@ private fun SourceRow(
     site: SourceSite,
     first: Boolean,
     onToggle: (Boolean) -> Unit,
-    onPing: ((Boolean) -> Unit) -> Unit,
+    onPing: ((SourceHealth) -> Unit) -> Unit,
     onRemove: () -> Unit,
 ) {
-    var ping by remember(site.id) { mutableStateOf<Boolean?>(null) }
+    var health by remember(site.id) { mutableStateOf<SourceHealth?>(null) }
     var pinging by remember(site.id) { mutableStateOf(false) }
+
+    // 进设置页先自动测一次：以前一行行都是「测试」，用户看不出到底谁挂了。
+    LaunchedEffect(site.id) {
+        if (health == null && !pinging) {
+            pinging = true
+            onPing { result ->
+                health = result
+                pinging = false
+            }
+        }
+    }
 
     Column {
         if (!first) {
@@ -301,9 +315,11 @@ private fun SourceRow(
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            val dot = when (ping) {
-                true -> Accent.Online
-                false -> Accent.New
+            val dot = when (health) {
+                SourceHealth.ONLINE -> Accent.Online
+                SourceHealth.OFFLINE -> Accent.New
+                // 测不准用金色而不是红色：超时不代表源站挂了。
+                SourceHealth.UNKNOWN -> Accent.Gold
                 null -> Ink.Text3
             }
             Box(
@@ -334,16 +350,22 @@ private fun SourceRow(
                     Text(
                         text = when {
                             pinging -> "测试中…"
-                            ping == true -> "可用"
-                            ping == false -> "不可用"
+                            health == SourceHealth.ONLINE -> "可用"
+                            health == SourceHealth.OFFLINE -> "不可用，点此重测"
+                            health == SourceHealth.UNKNOWN -> "超时未测准，点此重测"
                             else -> "测试"
                         },
                         style = MaterialTheme.typography.labelMedium,
-                        color = Accent.Brand,
+                        color = when (health) {
+                            SourceHealth.ONLINE -> Accent.Online
+                            SourceHealth.OFFLINE -> Accent.New
+                            SourceHealth.UNKNOWN -> Accent.Gold
+                            null -> Accent.Brand
+                        },
                         modifier = Modifier.clickable(enabled = !pinging) {
                             pinging = true
-                            onPing { ok ->
-                                ping = ok
+                            onPing { result ->
+                                health = result
                                 pinging = false
                             }
                         },
@@ -639,10 +661,15 @@ private fun AddSourceSheet(container: AppContainer, onDismiss: () -> Unit) {
                             name = name.ifBlank { "未命名源" },
                             baseUrl = url.trim(),
                         )
-                        val ok = withContext(Dispatchers.IO) {
-                            runCatching { container.api.ping(site) }.getOrDefault(false)
+                        val health = withContext(Dispatchers.IO) {
+                            runCatching { container.api.probe(site) }
+                                .getOrDefault(SourceHealth.UNKNOWN)
                         }
-                        testResult = if (ok) "连接正常，可以保存" else "连不上，检查地址或网络"
+                        testResult = when (health) {
+                            SourceHealth.ONLINE -> "连接正常，可以保存"
+                            SourceHealth.OFFLINE -> "连不上，检查地址或网络"
+                            SourceHealth.UNKNOWN -> "网络超时没测通，可以先保存，之后在列表里重测"
+                        }
                         testing = false
                     }
                 }

@@ -5,6 +5,7 @@ import com.starpick.app.core.model.VodItem
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
 import io.ktor.client.statement.bodyAsText
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -38,19 +39,47 @@ class CmsV10Api(private val client: HttpClient) {
         mapOf("ac" to "detail", "ids" to vodId),
     ).firstOrNull()
 
-    /** 源设置页的探活：只看 HTTP 状态和是否含 list 字段，不解析内容。 */
-    suspend fun ping(site: SourceSite): Boolean = runCatching {
-        withTimeout(PING_TIMEOUT_MS) {
-            val response = client.get(endpoint(site.baseUrl)) {
-                url {
-                    parameters.append("ac", "videolist")
-                    parameters.append("pg", "1")
-                }
-                headers.append("User-Agent", USER_AGENT)
-            }
-            response.status.value in 200..299 && response.bodyAsText().contains("\"list\"")
+    /**
+     * 源设置页的探活。
+     *
+     * 用 `ac=list` 而不是 `ac=videolist`：后者一次返回 200~700KB（实测量子源要 16 秒），
+     * 手机上经常还没下完就超时，于是「能用」的源被误判成「不可用」。
+     * `ac=list` 只回一页目录（约 7~14KB，实测 0.5~2.6 秒）。
+     *
+     * 超时/网络异常不再等同于「不可用」：那是「测不准」，重试一次仍失败才报 UNKNOWN。
+     */
+    suspend fun probe(site: SourceSite): SourceHealth {
+        var unknown = false
+        repeat(2) { attempt ->
+            val result = runCatching {
+                withTimeout(PING_TIMEOUT_MS) { requestHealth(site) }
+            }.getOrNull() ?: SourceHealth.UNKNOWN
+            if (result != SourceHealth.UNKNOWN) return result
+            unknown = true
+            // 第一次就超时可能是冷启动/弱网，给一次重试；不额外退避，避免页面卡住。
+            if (attempt == 0) delay(300)
         }
-    }.getOrDefault(false)
+        return if (unknown) SourceHealth.UNKNOWN else SourceHealth.OFFLINE
+    }
+
+    private suspend fun requestHealth(site: SourceSite): SourceHealth {
+        val response = client.get(endpoint(site.baseUrl)) {
+            url {
+                parameters.append("ac", "list")
+                parameters.append("pg", "1")
+            }
+            headers.append("User-Agent", USER_AGENT)
+        }
+        if (response.status.value !in 200..299) return SourceHealth.OFFLINE
+        val body = response.bodyAsText().trimStart()
+        // 正常的苹果 CMS 会回 {"code":1,...,"list":[...]}；只要拿到 JSON 就算线路是通的，
+        // 个别源把结果包在 data 里或临时把 list 置空，也不该判成不可用。
+        return when {
+            body.contains("\"list\"") || body.contains("\"data\"") -> SourceHealth.ONLINE
+            body.startsWith("{") -> SourceHealth.ONLINE
+            else -> SourceHealth.OFFLINE
+        }
+    }
 
     private suspend fun fetch(site: SourceSite, params: Map<String, String>): List<VodItem> {
         val response = try {
@@ -136,6 +165,25 @@ class CmsV10Api(private val client: HttpClient) {
 
     companion object {
         private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 13) Starpick/0.1"
-        private const val PING_TIMEOUT_MS = 6_000L
+
+        /** 单次探活上限。弱网/海外线路首包可能好几秒，6 秒太紧会被误判成不可用。 */
+        private const val PING_TIMEOUT_MS = 12_000L
     }
+}
+
+/**
+ * 采集源的健康状态。
+ *
+ * 三态而不是布尔：超时/网络异常属于「测不准」，不能等同于「源站不可用」——
+ * 线上好几个源就是在弱网下被误判成红色「不可用」的。
+ */
+enum class SourceHealth {
+    /** 拿到了正常的苹果 CMS 响应。 */
+    ONLINE,
+
+    /** 明确失败：HTTP 4xx/5xx，或返回内容根本不是接口数据。 */
+    OFFLINE,
+
+    /** 超时/断网/DNS 抖动，无法下结论。 */
+    UNKNOWN,
 }
