@@ -32,6 +32,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -80,6 +81,21 @@ private val HOT_TABS = listOf(
 )
 
 /**
+ * 首页 UI 状态。由导航层持有，切 tab 回来时 Composable 会重新组合，
+ * 但这份数据活在 AppNav 的 remember 里，所以不会把豆瓣榜单再拉一遍。
+ *
+ * @property loadedTab 上一次成功加载的 tab 下标；-1 表示从未加载。
+ */
+class DiscoverUiState {
+    var tabIndex by mutableIntStateOf(0)
+    var subjects by mutableStateOf<List<DoubanSubject>>(emptyList())
+    var loading by mutableStateOf(false)
+    var refreshing by mutableStateOf(false)
+    var error by mutableStateOf<String?>(null)
+    var loadedTab by mutableIntStateOf(-1)
+}
+
+/**
  * 首页「发现」。
  *
  * 结构参考主流视频 App：
@@ -93,6 +109,7 @@ private val HOT_TABS = listOf(
 @Composable
 fun DiscoverScreen(
     container: AppContainer,
+    state: DiscoverUiState,
     onPick: (title: String) -> Unit,
     onResume: (VodItem, WatchProgress) -> Unit,
     onOpenSearch: () -> Unit,
@@ -102,28 +119,49 @@ fun DiscoverScreen(
     val progress by container.store.progress.collectAsState(initial = emptyList())
     val recent by container.store.recent.collectAsState(initial = emptyList())
 
-    var tabIndex by remember { mutableIntStateOf(0) }
-    var loading by remember { mutableStateOf(false) }
-    var subjects by remember { mutableStateOf<List<DoubanSubject>>(emptyList()) }
-    var error by remember { mutableStateOf<String?>(null) }
+    val subjects = state.subjects
+    val loading = state.loading
+    val error = state.error
     val scope = rememberCoroutineScope()
 
-    val load: () -> Unit = {
-        if (!loading) {
-            loading = true
-            error = null
+    /**
+     * 只在「从未加载」或「换了电影/电视剧」时自动拉取。
+     * 切 tab 回来、旋转屏幕、进出详情页都不会再触发。
+     *
+     * @param force true 表示手动刷新（下拉或顶栏按钮），忽略已有数据。
+     */
+    val load: (Boolean) -> Unit = { force ->
+        val tab = state.tabIndex
+        if (!state.loading && (force || state.loadedTab != tab)) {
+            state.loading = true
+            state.refreshing = force
+            state.error = null
             scope.launch {
-                val result = withContext(Dispatchers.IO) {
-                    container.douban.hot(HOT_TABS[tabIndex].first)
+                try {
+                    val result = withContext(Dispatchers.IO) {
+                        container.douban.hot(HOT_TABS[tab].first)
+                    }
+                    // 请求期间用户可能已经切到另一个 tab，结果过期就丢掉。
+                    if (state.tabIndex == tab) {
+                        if (result.isNotEmpty()) {
+                            state.subjects = result
+                            // 只有成功才记「已加载过」，失败后切走再回来会自动重试。
+                            state.loadedTab = tab
+                            state.error = null
+                        } else if (state.subjects.isEmpty()) {
+                            state.error = "豆瓣榜单暂时拿不到数据"
+                        }
+                        // 有旧数据但刷新失败：保留上次的榜单，不把页面清空。
+                    }
+                } finally {
+                    state.loading = false
+                    state.refreshing = false
                 }
-                subjects = result
-                if (result.isEmpty()) error = "豆瓣榜单暂时拿不到数据"
-                loading = false
             }
         }
     }
 
-    LaunchedEffect(tabIndex) { load() }
+    LaunchedEffect(state.tabIndex) { load(false) }
 
     // 没有源：先解决「能不能用」，再谈「看什么」。
     if (sources.isEmpty()) {
@@ -132,102 +170,110 @@ fun DiscoverScreen(
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        LazyColumn(
+        // 下拉刷新：唯一的手动刷新入口（顶栏那个刷新按钮保留，两者等价）。
+        PullToRefreshBox(
+            isRefreshing = state.refreshing,
+            onRefresh = { load(true) },
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(bottom = 8.dp),
         ) {
-            // Hero 顶到状态栏下，因此这一项不再加顶部 inset。
-            item {
-                if (subjects.isNotEmpty()) {
-                    HeroSection(subjects = subjects.take(6), onPick = onPick)
-                } else {
-                    Box(
-                        modifier = Modifier.fillMaxWidth().height(392.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        if (error != null) {
-                            EmptyState(
-                                title = "加载失败",
-                                description = error ?: "",
-                                actionLabel = "重试",
-                                onAction = load,
-                            )
-                        } else {
-                            CircularProgressIndicator(color = Accent.Brand, strokeWidth = 2.dp)
-                        }
-                    }
-                }
-            }
-
-            if (progress.isNotEmpty()) {
-                item { SectionHeader(title = "继续观看") }
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(bottom = 8.dp),
+            ) {
+                // Hero 顶到状态栏下，因此这一项不再加顶部 inset。
                 item {
-                    LazyRow(
-                        contentPadding = PaddingValues(horizontal = 20.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        items(progress.take(8), key = { it.key }) { record ->
-                            val item = recent.firstOrNull { it.key == record.key }
-                            ContinueCard(
-                                record = record,
-                                enabled = item != null,
-                                onClick = { if (item != null) onResume(item, record) },
-                            )
+                    if (subjects.isNotEmpty()) {
+                        HeroSection(subjects = subjects.take(6), onPick = onPick)
+                    } else {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().height(392.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            if (error != null) {
+                                EmptyState(
+                                    title = "加载失败",
+                                    description = error,
+                                    actionLabel = "重试",
+                                    onAction = { load(true) },
+                                )
+                            } else {
+                                CircularProgressIndicator(color = Accent.Brand, strokeWidth = 2.dp)
+                            }
                         }
                     }
                 }
-            }
 
-            item {
-                Row(modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 22.dp)) {
-                    SegmentedTabs(
-                        options = HOT_TABS.map { it.second },
-                        selectedIndex = tabIndex,
-                        onSelect = { if (it != tabIndex) tabIndex = it },
-                    )
-                }
-            }
-
-            item {
-                SectionHeader(
-                    title = "本周热门",
-                    trailing = if (subjects.isEmpty()) null else "共 ${subjects.size} 部",
-                )
-            }
-
-            item {
-                if (loading && subjects.isEmpty()) {
-                    Box(
-                        modifier = Modifier.fillMaxWidth().height(120.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        CircularProgressIndicator(color = Accent.Brand, strokeWidth = 2.dp)
+                if (progress.isNotEmpty()) {
+                    item { SectionHeader(title = "继续观看") }
+                    item {
+                        LazyRow(
+                            contentPadding = PaddingValues(horizontal = 20.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            items(progress.take(8), key = { it.key }) { record ->
+                                val item = recent.firstOrNull { it.key == record.key }
+                                ContinueCard(
+                                    record = record,
+                                    enabled = item != null,
+                                    onClick = { if (item != null) onResume(item, record) },
+                                )
+                            }
+                        }
                     }
-                } else {
-                    FlowPosterGrid(
-                        columns = 3,
-                        itemCount = subjects.size,
-                        modifier = Modifier.padding(horizontal = 20.dp),
-                    ) { index, itemModifier ->
-                        val s = subjects[index]
-                        PosterCard(
-                            title = s.title,
-                            cover = s.cover,
-                            rate = s.rate.takeIf { it.isNotBlank() },
-                            badge = if (s.isNew) "新" else null,
-                            subtitle = s.episodesInfo.takeIf { it.isNotBlank() },
-                            modifier = itemModifier,
-                            onClick = { onPick(s.title) },
+                }
+
+                item {
+                    Row(modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 22.dp)) {
+                        SegmentedTabs(
+                            options = HOT_TABS.map { it.second },
+                            selectedIndex = state.tabIndex,
+                            onSelect = { if (it != state.tabIndex) state.tabIndex = it },
                         )
                     }
                 }
+
+                item {
+                    SectionHeader(
+                        title = "本周热门",
+                        trailing = if (subjects.isEmpty()) null else "共 ${subjects.size} 部",
+                    )
+                }
+
+                item {
+                    if (loading && subjects.isEmpty()) {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().height(120.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            CircularProgressIndicator(color = Accent.Brand, strokeWidth = 2.dp)
+                        }
+                    } else {
+                        FlowPosterGrid(
+                            columns = 3,
+                            itemCount = subjects.size,
+                            modifier = Modifier.padding(horizontal = 20.dp),
+                        ) { index, itemModifier ->
+                            val s = subjects[index]
+                            PosterCard(
+                                title = s.title,
+                                cover = s.cover,
+                                rate = s.rate.takeIf { it.isNotBlank() },
+                                badge = if (s.isNew) "新" else null,
+                                subtitle = s.episodesInfo.takeIf { it.isNotBlank() },
+                                modifier = itemModifier,
+                                onClick = { onPick(s.title) },
+                            )
+                        }
+                    }
+                }
             }
+
         }
 
         // 品牌行固定在顶部（压在 Hero 上），随内容滚动始终保持可达。
         TopBar(
             loading = loading,
-            onRefresh = load,
+            onRefresh = { load(true) },
             onSearch = onOpenSearch,
             modifier = Modifier.align(Alignment.TopStart),
         )

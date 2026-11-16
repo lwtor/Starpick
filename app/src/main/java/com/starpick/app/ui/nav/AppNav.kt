@@ -32,6 +32,7 @@ import com.starpick.app.core.model.SearchGroup
 import com.starpick.app.core.model.VodItem
 import com.starpick.app.ui.screen.DetailScreen
 import com.starpick.app.ui.screen.DiscoverScreen
+import com.starpick.app.ui.screen.DiscoverUiState
 import com.starpick.app.ui.screen.HomeScreen
 import com.starpick.app.ui.screen.PlayerScreen
 import com.starpick.app.ui.screen.ResolvingScreen
@@ -71,6 +72,8 @@ private val tabs = listOf(
 @Composable
 fun StarpickNav(container: AppContainer) {
     val stack = remember { mutableStateListOf<Screen>(Screen.Discover) }
+    // 首页数据挂在导航层：切走再切回时 Composable 会重建，但榜单不会重新拉一遍。
+    val discoverState = remember { DiscoverUiState() }
     val current = stack.last()
     val pop: () -> Unit = { if (stack.size > 1) stack.removeLastOrNull() }
     val goTab: (Screen) -> Unit = { tab ->
@@ -94,7 +97,10 @@ fun StarpickNav(container: AppContainer) {
         is Screen.Resolving -> ResolvingScreen(
             container = container,
             title = current.title,
-            onResolved = { group -> stack.add(Screen.Detail(group)) },
+            // 必须「替换」而不是「压栈」：过渡页只负责解析片名，解析完就不该留在返回栈里。
+            // 之前是 add，导致详情页返回后回落到 Resolving，它又会重新解析并再次推开详情，
+            // 表现出来就是「详情页返回不了」。
+            onResolved = { group -> stack[stack.lastIndex] = Screen.Detail(group) },
             onBack = pop,
         )
 
@@ -122,6 +128,7 @@ fun StarpickNav(container: AppContainer) {
                     when (current) {
                         Screen.Discover -> DiscoverScreen(
                             container = container,
+                            state = discoverState,
                             onPick = { title -> stack.add(Screen.Resolving(title)) },
                             onResume = { item, record ->
                                 stack.add(

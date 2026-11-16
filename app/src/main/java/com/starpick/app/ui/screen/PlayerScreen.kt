@@ -6,9 +6,11 @@ import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.widget.FrameLayout
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -27,6 +29,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -41,8 +44,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -170,6 +171,16 @@ fun PlayerScreen(
 
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
+    // 退出全屏 ≠ 退出播放页。横屏时（无论点控制条的返回箭头还是按系统返回键）
+    // 都只把屏幕转回竖屏，留在播放页。
+    val exitFullscreen: () -> Unit = {
+        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+    }
+
+    // 这个 BackHandler 比 AppNav 里的那个更晚注册，所以返回事件先落到这里；
+    // 抽屉打开时让给抽屉，返回先关抽屉。
+    BackHandler(enabled = isLandscape && !showSheet) { exitFullscreen() }
+
     // 引入时恢复进度（仅当记录属于当前线路 + 当前集）。
     LaunchedEffect(player, item.key) {
         withContext(Dispatchers.Main.immediate) {
@@ -259,9 +270,9 @@ fun PlayerScreen(
         }
     }
 
-    // 控制条 3.5 秒自动淡出（暂停时常驻）。
-    LaunchedEffect(showControls, isPlaying) {
-        if (showControls && isPlaying) {
+    // 控制条 3.5 秒自动淡出（暂停时常驻，拖动进度时不淡出）。
+    LaunchedEffect(showControls, isPlaying, scrubbing) {
+        if (showControls && isPlaying && !scrubbing) {
             delay(3_500)
             showControls = false
         }
@@ -342,7 +353,7 @@ fun PlayerScreen(
                         hasPrev = safeEpisode > 0,
                         hasNext = safeEpisode < episodes.size - 1,
                         isLandscape = isLandscape,
-                        onBack = onBack,
+                        onBack = { if (isLandscape) exitFullscreen() else onBack() },
                         onTogglePlay = togglePlay,
                         onSeekBy = seekBy,
                         onPrev = { playEpisode(safeEpisode - 1) },
@@ -371,9 +382,12 @@ fun PlayerScreen(
                             showControls = true
                         },
                         onScrubFinished = {
-                            val target = (scrubFraction * durationMs.toFloat()).toLong()
-                            player.seekTo(target)
-                            positionMs = target
+                            // 时长还没拿到时不 seek，否则会把进度打到 0。
+                            if (durationMs > 0) {
+                                val target = (scrubFraction * durationMs.toFloat()).toLong()
+                                player.seekTo(target)
+                                positionMs = target
+                            }
                             scrubbing = false
                         },
                     )
@@ -600,18 +614,13 @@ private fun PlayerControls(
                 )
                 .padding(horizontal = 12.dp, vertical = 6.dp),
         ) {
-            Slider(
-                value = if (scrubbing) scrubFraction else {
+            PlayerSeekBar(
+                fraction = if (scrubbing) scrubFraction else {
                     if (durationMs > 0) (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
                 },
-                onValueChange = onScrub,
-                onValueChangeFinished = onScrubFinished,
-                colors = SliderDefaults.colors(
-                    thumbColor = Accent.Gold,
-                    activeTrackColor = Accent.Gold,
-                    inactiveTrackColor = Color(0x38FFFFFF),
-                ),
-                modifier = Modifier.fillMaxWidth().height(24.dp),
+                scrubbing = scrubbing,
+                onScrub = onScrub,
+                onScrubFinished = onScrubFinished,
             )
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
@@ -631,6 +640,79 @@ private fun PlayerControls(
                     size = 34.dp,
                 )
             }
+        }
+    }
+}
+
+/**
+ * 播放进度条。
+ *
+ * 不用 Material 的 [androidx.compose.material3.Slider]：它自带 20dp 拇指和 4dp 轨道，
+ * 在播放器里显得很粗、和深色控制层不搭。这里改成「3dp 细轨 + 9dp 小圆点」，
+ * 拖动时轨道变 5dp、圆点放大到 14dp，并直接把目标时间写进下面那行 HH:MM:SS。
+ *
+ * 手势自己接：横向拖动改进度，点一下轨道直接跳。
+ */
+@Composable
+private fun PlayerSeekBar(
+    fraction: Float,
+    scrubbing: Boolean,
+    onScrub: (Float) -> Unit,
+    onScrubFinished: () -> Unit,
+) {
+    val trackHeight = if (scrubbing) 5.dp else 3.dp
+    val thumbSize = if (scrubbing) 14.dp else 9.dp
+    val safeFraction = fraction.coerceIn(0f, 1f)
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(26.dp)
+            .pointerInput(Unit) {
+                detectDragGestures(
+                    onDragStart = { offset ->
+                        onScrub((offset.x / size.width.toFloat()).coerceIn(0f, 1f))
+                    },
+                    onDrag = { change, _ ->
+                        change.consume()
+                        onScrub((change.position.x / size.width.toFloat()).coerceIn(0f, 1f))
+                    },
+                    onDragEnd = { onScrubFinished() },
+                    onDragCancel = { onScrubFinished() },
+                )
+            }
+            .pointerInput(Unit) {
+                detectTapGestures { offset ->
+                    onScrub((offset.x / size.width.toFloat()).coerceIn(0f, 1f))
+                    onScrubFinished()
+                }
+            },
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(trackHeight)
+                .clip(RoundedCornerShape(trackHeight / 2))
+                .background(Color(0x33FFFFFF)),
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(safeFraction)
+                .height(trackHeight)
+                .clip(RoundedCornerShape(trackHeight / 2))
+                .background(Accent.Gold),
+        )
+        // 拇指用两侧空白 weight 顶到目标位置，避免再引一层 BoxWithConstraints。
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.weight(safeFraction.coerceAtLeast(0.0001f)))
+            Box(
+                modifier = Modifier
+                    .size(thumbSize)
+                    .clip(CircleShape)
+                    .background(if (scrubbing) Accent.Gold else Color.White),
+            )
+            Box(Modifier.weight((1f - safeFraction).coerceAtLeast(0.0001f)))
         }
     }
 }
