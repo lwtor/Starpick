@@ -1,5 +1,9 @@
 package com.starpick.app.ui.nav
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
@@ -21,9 +25,14 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
@@ -92,8 +101,26 @@ fun StarpickNav(container: AppContainer) {
         stack.add(tab)
     }
 
-    // 只在栈深 > 1 时拦截返回；栈深 == 1 时放行给系统（根 tab 返回即退出）。
-    BackHandler(enabled = stack.size > 1) { pop() }
+    // 根 tab 第一次返回只提示，1 秒内再按一次才真正退出。
+    // 子页面的 BackHandler（搜索页清搜索、播放器退全屏）注册得更晚，会先于这里响应。
+    val context = LocalContext.current
+    var lastBackAt by remember { mutableLongStateOf(0L) }
+    var exitToast by remember { mutableStateOf<Toast?>(null) }
+    BackHandler {
+        if (stack.size > 1) {
+            pop()
+        } else {
+            val now = System.currentTimeMillis()
+            if (now - lastBackAt < 1_000L) {
+                exitToast?.cancel()
+                context.findActivity()?.finish()
+            } else {
+                lastBackAt = now
+                exitToast = Toast.makeText(context, "再按一次退出星匣", Toast.LENGTH_SHORT)
+                exitToast?.show()
+            }
+        }
+    }
 
     when (current) {
         is Screen.Detail -> DetailScreen(
@@ -215,4 +242,10 @@ private fun BottomTabs(current: Screen, goTab: (Screen) -> Unit) {
             )
         }
     }
+}
+
+private fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }

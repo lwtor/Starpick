@@ -1,5 +1,6 @@
 package com.starpick.app.ui.screen
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -78,6 +79,19 @@ class SearchUiState {
     var hotLoading by mutableStateOf(false)
 
     val listState = LazyListState()
+
+    /** 有输入或结果时，返回键先清搜索而不是直接退出页面。 */
+    val hasSearch: Boolean get() = query.isNotEmpty() || keyword.isNotEmpty() || outcome != null
+
+    fun clearSearch() {
+        query = ""
+        keyword = ""
+        outcome = null
+        elapsed = 0L
+        loading = false
+        refreshing = false
+        listState.requestScrollToItem(0)
+    }
 }
 
 /**
@@ -97,6 +111,9 @@ fun SearchScreen(
     val history by container.store.searchHistory.collectAsState()
     val enabledSources = remember(sources) { sources.filter { it.enabled } }
     val scope = rememberCoroutineScope()
+
+    // 有搜索内容时，返回键只清空搜索，不退出页面；再按一次才轮到导航层处理退出。
+    BackHandler(enabled = state.hasSearch) { state.clearSearch() }
 
     val loadHot: (Boolean) -> Unit = { force ->
         if (!state.hotLoading && (force || !state.hotLoaded)) {
@@ -157,11 +174,7 @@ fun SearchScreen(
             placeholder = "搜索片名 / 演员",
             onQueryChange = { state.query = it },
             onSearch = { runSearch(state.query, false) },
-            onClear = {
-                state.query = ""
-                state.keyword = ""
-                state.outcome = null
-            },
+            onClear = { state.clearSearch() },
             modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
         )
 

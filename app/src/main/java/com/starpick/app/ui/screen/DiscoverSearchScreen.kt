@@ -1,5 +1,6 @@
 package com.starpick.app.ui.screen
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -69,6 +70,18 @@ class DoubanSearchUiState {
     var hotLoaded by mutableStateOf(false)
 
     val listState = LazyListState()
+
+    /** 有输入或结果时，返回键先清搜索而不是退出本页。 */
+    val hasSearch: Boolean get() = query.isNotEmpty() || keyword.isNotEmpty() || results.isNotEmpty()
+
+    fun clearSearch() {
+        query = ""
+        keyword = ""
+        results = emptyList()
+        loading = false
+        refreshing = false
+        listState.requestScrollToItem(0)
+    }
 }
 
 /**
@@ -88,6 +101,13 @@ fun DiscoverSearchScreen(
 ) {
     val history by container.store.searchHistory.collectAsState()
     val scope = rememberCoroutineScope()
+
+    // 系统返回键：有搜索内容就先清空，不退出本页。
+    BackHandler(enabled = state.hasSearch) { state.clearSearch() }
+    // 顶部返回箭头遵循同样规则，避免两种返回方式行为不一致。
+    val handleBack: () -> Unit = {
+        if (state.hasSearch) state.clearSearch() else onBack()
+    }
 
     val search: (String, Boolean) -> Unit = { raw, isRefresh ->
         val keyword = raw.trim()
@@ -142,7 +162,7 @@ fun DiscoverSearchScreen(
             modifier = Modifier.fillMaxWidth().padding(start = 4.dp, end = 20.dp, top = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = onBack) {
+            IconButton(onClick = handleBack) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                     contentDescription = "返回",
@@ -154,11 +174,7 @@ fun DiscoverSearchScreen(
                 placeholder = "搜索豆瓣影视",
                 onQueryChange = { state.query = it },
                 onSearch = { search(state.query, false) },
-                onClear = {
-                    state.query = ""
-                    state.keyword = ""
-                    state.results = emptyList()
-                },
+                onClear = { state.clearSearch() },
                 modifier = Modifier.weight(1f),
             )
         }
