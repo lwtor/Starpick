@@ -75,6 +75,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -720,6 +721,9 @@ private fun PlayerControls(
     val duration = 240
     val slide = tween<IntOffset>(durationMillis = duration)
     val fade = tween<Float>(durationMillis = duration)
+    // 控制条上的文字比正文小一档原本是为让位给画面，但 10sp 在播放器里读不清，
+    // 统一放大到 13sp；进度条本身尺寸不动，只把两侧的字和按钮撑大。
+    val timeStyle = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold)
     // 顶栏热区吃掉点击，避免点标题条空白处把控制条关掉。
     val swallowTap = Modifier.clickable(
         interactionSource = remember { MutableInteractionSource() },
@@ -756,6 +760,7 @@ private fun PlayerControls(
                     Text(
                         text = title,
                         style = MaterialTheme.typography.titleSmall,
+                        fontSize = 15.sp,
                         color = Color.White,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -763,8 +768,8 @@ private fun PlayerControls(
                     if (episodeName.isNotBlank()) {
                         Text(
                             text = episodeName,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color(0x99FFFFFF),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Color(0xB3FFFFFF),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -773,7 +778,7 @@ private fun PlayerControls(
                 TextAction("选集", onClick = onEpisodes)
                 Text(
                     text = "${formatSpeed(playbackSpeed)}x",
-                    style = MaterialTheme.typography.labelMedium,
+                    style = MaterialTheme.typography.labelLarge,
                     color = Accent.Gold,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier
@@ -803,13 +808,13 @@ private fun PlayerControls(
                         ),
                     )
                     .then(swallowTap)
-                    .padding(start = 4.dp, end = 4.dp, top = 16.dp, bottom = 4.dp),
+                    .padding(start = 2.dp, end = 2.dp, top = 12.dp, bottom = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 // 左：播放 / 暂停
                 Box(
                     modifier = Modifier
-                        .size(36.dp)
+                        .size(44.dp)
                         .clip(CircleShape)
                         .clickable(onClick = onTogglePlay),
                     contentAlignment = Alignment.Center,
@@ -818,21 +823,21 @@ private fun PlayerControls(
                         imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                         contentDescription = if (isPlaying) "暂停" else "播放",
                         tint = Color.White,
-                        modifier = Modifier.size(26.dp),
+                        modifier = Modifier.size(30.dp),
                     )
                 }
 
                 // 左：当前进度
                 Text(
                     text = formatPosition(positionMs),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xE6FFFFFF),
+                    style = timeStyle,
+                    color = Color.White,
                     textAlign = TextAlign.Center,
                     maxLines = 1,
-                    modifier = Modifier.width(50.dp),
+                    modifier = Modifier.width(58.dp),
                 )
 
-                // 中：进度条
+                // 中：进度条（尺寸不变，只让两侧的字和按钮变大）
                 PlayerSeekBar(
                     modifier = Modifier
                         .weight(1f)
@@ -848,11 +853,11 @@ private fun PlayerControls(
                 // 右：总时长
                 Text(
                     text = formatPosition(durationMs),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color(0x99FFFFFF),
+                    style = timeStyle,
+                    color = Color(0xB3FFFFFF),
                     textAlign = TextAlign.Center,
                     maxLines = 1,
-                    modifier = Modifier.width(56.dp),
+                    modifier = Modifier.width(66.dp),
                 )
 
                 // 右：全屏切换
@@ -860,8 +865,8 @@ private fun PlayerControls(
                     onClick = onFullscreen,
                     icon = if (isLandscape) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
                     description = "全屏",
-                    size = 38.dp,
-                    iconSize = 22.dp,
+                    size = 46.dp,
+                    iconSize = 26.dp,
                 )
             }
         }
@@ -940,12 +945,12 @@ private fun PlayerSeekBar(
 private fun TextAction(text: String, onClick: () -> Unit) {
     Text(
         text = text,
-        style = MaterialTheme.typography.labelMedium,
+        style = MaterialTheme.typography.labelLarge,
         color = Color.White,
         modifier = Modifier
             .clip(RoundedCornerShape(8.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 6.dp),
+            .padding(horizontal = 10.dp, vertical = 8.dp),
     )
 }
 
@@ -954,8 +959,8 @@ private fun IconHit(
     onClick: () -> Unit,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     description: String,
-    size: androidx.compose.ui.unit.Dp = 40.dp,
-    iconSize: androidx.compose.ui.unit.Dp = size * 0.45f,
+    size: androidx.compose.ui.unit.Dp = 44.dp,
+    iconSize: androidx.compose.ui.unit.Dp = size * 0.5f,
 ) {
     Box(
         modifier = Modifier
