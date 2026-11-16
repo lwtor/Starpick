@@ -46,11 +46,44 @@ internal class ReleaseApi(
             .build()
         val response = awaitResponse(httpClient, request)
         response.use {
-            val body = it.body?.string().orEmpty()
+            val body = it.body.string()
             if (!it.isSuccessful) throw releaseError(it.code, body)
             return parseRelease(JSONObject(body))
         }
     }
+
+    /**
+     * Resolves the latest tag through the public web redirect instead of the REST API.
+     *
+     * `https://github.com/{owner}/{repo}/releases/latest` answers `302` with the tag page as
+     * `Location`, needs no token and — unlike `api.github.com` — is not subject to the anonymous
+     * 60 requests/hour quota that a shared carrier NAT exhausts quickly. The final request URL is
+     * read back from the response, so no manual `Location` parsing is needed.
+     */
+    suspend fun latestTagViaRedirect(owner: String, repository: String): String {
+        val request = Request.Builder()
+            .url("$WEB_BASE_URL/${segment(owner)}/${segment(repository)}/releases/latest")
+            .header("User-Agent", USER_AGENT)
+            .header("Cache-Control", "no-cache")
+            .get()
+            .build()
+        val response = awaitResponse(httpClient, request)
+        response.use {
+            if (!it.isSuccessful) throw releaseError(it.code, "")
+            val segments = it.request.url.pathSegments
+            val tagIndex = segments.indexOf("tag")
+            val tag = segments.getOrNull(tagIndex + 1)
+            if (tagIndex < 0 || tag.isNullOrBlank()) {
+                throw IOException("no release tag in the redirect target")
+            }
+            return tag
+        }
+    }
+
+    /** Permanently-latest download URL for a fixed asset name, resolved by GitHub itself. */
+    fun latestAssetUrl(owner: String, repository: String, assetName: String): String =
+        "$WEB_BASE_URL/${segment(owner)}/${segment(repository)}/releases/latest/download/" +
+            java.net.URLEncoder.encode(assetName, Charsets.UTF_8.name()).replace("+", "%20")
 
     private fun releaseError(statusCode: Int, body: String): ReleaseApiException {
         val message = runCatching { JSONObject(body).optString("message") }.getOrNull()
@@ -64,6 +97,7 @@ internal class ReleaseApi(
 
     companion object {
         private const val DEFAULT_API_BASE_URL = "https://api.github.com"
+        private const val WEB_BASE_URL = "https://github.com"
         private const val GITHUB_API_VERSION = "2026-03-10"
         private const val USER_AGENT = "github-updater-android"
     }
@@ -104,8 +138,8 @@ internal suspend fun awaitResponse(httpClient: OkHttpClient, request: Request): 
         val call = httpClient.newCall(request)
         continuation.invokeOnCancellation { call.cancel() }
         call.enqueue(object : Callback {
-            override fun onFailure(call: Call, error: IOException) {
-                if (continuation.isActive) continuation.resumeWithException(error)
+            override fun onFailure(call: Call, e: IOException) {
+                if (continuation.isActive) continuation.resumeWithException(e)
             }
 
             override fun onResponse(call: Call, response: Response) {

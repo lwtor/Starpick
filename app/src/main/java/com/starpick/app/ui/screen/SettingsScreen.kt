@@ -381,8 +381,9 @@ private fun VersionRow(container: AppContainer) {
     val available = status as? UpdateStatus.UpdateAvailable
 
     val statusText = when {
-        message != null -> message!!
         downloaded != null -> "新版本已下载，点「安装」"
+        busy -> "正在检查…"
+        message != null -> message!!
         available != null -> "发现新版本，点「下载」"
         else -> "尚未检查"
     }
@@ -439,20 +440,21 @@ private fun VersionRow(container: AppContainer) {
                         val result = withContext(Dispatchers.IO) {
                             runCatching {
                                 container.updater.check(BuildConfig.VERSION_CODE.toLong())
-                            }.getOrNull()
+                            }
                         }
-                        when (result) {
-                            is UpdateCheck.Available -> withContext(Dispatchers.IO) {
-                                runCatching {
-                                    container.updater.checkAndPrefetch(
-                                        BuildConfig.VERSION_CODE.toLong(),
-                                    )
-                                }
+                        when (val check = result.getOrNull()) {
+                            is UpdateCheck.Available -> {
+                                // 不在前台等 25 MB 下载完，交给后台任务跑，进度经 status 回流。
+                                container.startUpdateCheck()
+                                message = "已开始后台下载，完成后这里会出现「安装」"
                             }
 
-                            is UpdateCheck.UpToDate -> message = "已是最新版本"
+                            is UpdateCheck.UpToDate ->
+                                message = "已是最新版本（${check.release.tagName}）"
+
                             UpdateCheck.NoInstallableAsset -> message = "最新发布里没有 APK"
-                            null -> message = "检查失败，请检查网络"
+                            null -> message = "检查失败：" +
+                                (result.exceptionOrNull()?.message ?: "网络异常")
                         }
                         busy = false
                     }

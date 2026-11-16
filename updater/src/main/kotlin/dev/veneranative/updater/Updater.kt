@@ -42,11 +42,48 @@ class Updater private constructor(
         get() = updaterCacheDir(appContext, config.scope)
 
     override suspend fun check(installedVersionCode: Long): UpdateCheck {
-        val release = api.latestRelease(config.owner, config.repository)
+        val release: ReleaseInfo = try {
+            api.latestRelease(config.owner, config.repository)
+        } catch (error: Exception) {
+            if (error is CancellationException) throw error
+            // api.github.com is anonymous-rate-limited per IP; a shared carrier NAT hits 403
+            // long before a user ever sees a new version. Fall back to the web redirect when the
+            // release publishes under a fixed asset name.
+            return fallbackCheck(installedVersionCode) ?: throw error
+        }
         val asset = ReleaseSelection.pickUpdateApk(release.assets)
             ?: return UpdateCheck.NoInstallableAsset
         val versionCode = config.versionResolver.versionCodeOf(release.tagName, asset.name)
             ?: return UpdateCheck.NoInstallableAsset
+        return if (ReleaseSelection.isUpdate(versionCode, installedVersionCode)) {
+            UpdateCheck.Available(release, asset, versionCode)
+        } else {
+            UpdateCheck.UpToDate(release, asset)
+        }
+    }
+
+    /**
+     * Quota-free path: read the tag from `releases/latest`'s redirect, then point the download at
+     * `releases/latest/download/<fixed name>` so the URL never has to be looked up either.
+     * Returns null when the app publishes no fixed asset name, leaving the API error to surface.
+     */
+    private suspend fun fallbackCheck(installedVersionCode: Long): UpdateCheck? {
+        val assetName = config.fallbackAssetName ?: return null
+        val tagName = api.latestTagViaRedirect(config.owner, config.repository)
+        val versionCode = config.versionResolver.versionCodeOf(tagName, assetName) ?: return null
+        val asset = ReleaseAsset(
+            name = assetName,
+            downloadUrl = api.latestAssetUrl(config.owner, config.repository, assetName),
+            sizeBytes = 0L,
+            contentType = null,
+        )
+        val release = ReleaseInfo(
+            tagName = tagName,
+            name = tagName,
+            notes = null,
+            publishedAt = null,
+            assets = listOf(asset),
+        )
         return if (ReleaseSelection.isUpdate(versionCode, installedVersionCode)) {
             UpdateCheck.Available(release, asset, versionCode)
         } else {

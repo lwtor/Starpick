@@ -11,6 +11,10 @@ package dev.veneranative.updater
  *   SharedPreferences, notification channel and the unique work name), so one app can host several
  *   independent update sources without them colliding.
  * @property versionResolver maps a release to the Android versionCode it competes with.
+ * @property fallbackAssetName file name the release always publishes its APK under, e.g.
+ *   `Starpick.apk`. When set, a failed `api.github.com` call falls back to the
+ *   `releases/latest/download/<name>` redirect, which needs no API quota. Leave null to require
+ *   the REST API.
  * @property strings user-visible text; the SDK ships Chinese defaults, override them per app.
  */
 data class UpdaterConfig(
@@ -20,6 +24,7 @@ data class UpdaterConfig(
     val fileProviderAuthority: String,
     val scope: String = "self_update",
     val versionResolver: ReleaseVersionResolver = ReleaseVersionResolver.AssetNameSuffix(),
+    val fallbackAssetName: String? = null,
     val strings: UpdaterStrings = UpdaterStrings(),
 )
 

@@ -82,8 +82,11 @@ class AppContainer(context: Context) {
     val aggregator = SearchAggregator(api)
 
     /**
-     * GitHub Release 应用内自升级。owner/repository 指向发布 APK 的公开仓库；
-     * versionCode 从资产名尾部 `-<数字>` 读取，回退到 tag `vX.Y.Z` 折算。
+     * GitHub Release 应用内自升级。owner/repository 指向发布 APK 的公开仓库。
+     *
+     * versionCode 一律由 tag `vX.Y.Z` 折算（`major*1e6 + minor*1e3 + patch`），资产的固定名
+     * `Starpick.apk` 不参与版本判断。这样 api.github.com 被限流时，可以退回
+     * `releases/latest/download/Starpick.apk` 这条不需要配额的通道，两条路径算出的版本号一致。
      */
     val updater: Updater = Updater.create(
         context = context.applicationContext,
@@ -92,10 +95,8 @@ class AppContainer(context: Context) {
             repository = "Starpick",
             fileProviderAuthority = "${context.applicationContext.packageName}.updater",
             scope = "self_update",
-            versionResolver = ReleaseVersionResolver.Or(
-                ReleaseVersionResolver.AssetNameSuffix(),
-                ReleaseVersionResolver.TagScheme(),
-            ),
+            versionResolver = ReleaseVersionResolver.TagScheme(),
+            fallbackAssetName = "Starpick.apk",
             strings = UpdaterStrings(
                 channelName = "应用更新",
                 channelDescription = "显示新版本 APK 的下载进度",
