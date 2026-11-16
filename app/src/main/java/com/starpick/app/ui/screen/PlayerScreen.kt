@@ -51,6 +51,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -94,6 +95,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.net.UnknownHostException
 
 /**
  * 内嵌播放器：只负责「一块视频画面 + 控制层 + 选集抽屉」，不再是独立页面。
@@ -165,6 +167,14 @@ fun PlayerSurface(
     var buffering by remember(currentUrl, reloadToken) { mutableStateOf(true) }
     // 每个播放地址只静默重试一次，避免坏地址无限重连。
     var autoRetried by remember(currentUrl) { mutableStateOf(false) }
+    // 自动兜底：同地址重试一次 → 换一条没试过的线路 → 换下一个源。
+    // 采集站经常「一条线路死、另一条活」，让用户自己去点换源太重了。
+    val triedLines = remember(item.key) { mutableStateListOf<Int>() }
+    // 按内容归并（跨源同一部片）：避免 A→B→C→A 来回无限换源。
+    var sourceSwitched by remember(item.contentKey) { mutableStateOf(false) }
+    var notice by remember(item.key) { mutableStateOf<String?>(null) }
+    // 只要出过一帧画面就不再按「超时」判失败，慢源不该被误杀。
+    var everReady by remember(currentUrl) { mutableStateOf(false) }
 
     // 采集站的地址不一定是直链：`/share/<hash>` 这类藏了扩展名的 HLS、或者干脆是分享网页，
     // 原样丢给播放器会解析失败。先探一次，再按探测结果给 MIME 提示。
@@ -255,6 +265,8 @@ fun PlayerSurface(
                     Player.STATE_READY, Player.STATE_ENDED -> {
                         buffering = false
                         failure = null
+                        notice = null
+                        everReady = true
                     }
                     else -> Unit
                 }
@@ -262,23 +274,42 @@ fun PlayerSurface(
 
             override fun onPlayerError(error: PlaybackException) {
                 buffering = false
+                // 1) 同一地址先静默重试一次：偶发断流、握手超时很常见。
                 if (!autoRetried) {
                     autoRetried = true
                     reloadToken++
-                } else {
-                    failure = describePlaybackError(error)
+                    return
                 }
+                triedLines.add(groupIndex)
+                // 2) 换一条还没试过的线路。同一部片不同线路的 CDN 是独立的，一条死一条活。
+                val nextLine = groups.indices.firstOrNull { it != groupIndex && it !in triedLines }
+                if (nextLine != null) {
+                    notice = "该线路播放失败，已自动切到下一条线路"
+                    onGroupChange(nextLine)
+                    return
+                }
+                // 3) 同源所有线路都不行，再换下一个源，但每个内容只自动换一次。
+                if (!sourceSwitched && onSwitchSource != null) {
+                    sourceSwitched = true
+                    notice = "这个源播放失败，已自动换源"
+                    onSwitchSource()
+                    return
+                }
+                failure = describePlaybackError(error)
             }
         }
         player.addListener(listener)
         onDispose { player.removeListener(listener) }
     }
 
-    // 卡在缓冲 15 秒就当失败：源站不响应时不能一直转圈下去。
-    LaunchedEffect(buffering, failure) {
-        if (!buffering || failure != null) return@LaunchedEffect
-        delay(15_000)
-        if (failure == null) failure = "加载超时：源站没有响应"
+    // 缓冲久了才判失败。之前是 15 秒，慢源（自建站 / 海外 CDN）首帧常常要 20 秒以上，
+    // 会被误判成「源站没有响应」；而且只要出过画面就不再判超时，短暂卡顿不该打断播放。
+    LaunchedEffect(buffering, failure, everReady) {
+        if (!buffering || failure != null || everReady) return@LaunchedEffect
+        delay(30_000)
+        if (failure == null) {
+            failure = "源站长时间没有响应（可能已关站、换了域名或被网络拦截），可以换源试试"
+        }
     }
 
     // 500ms 轮询：刷新 UI 状态；每 5 秒落一次盘。
@@ -453,6 +484,8 @@ fun PlayerSurface(
                                 failure = null
                                 buffering = true
                                 autoRetried = false
+                                notice = null
+                                triedLines.clear()
                                 onSwitchSource()
                             }
                         }
@@ -460,6 +493,9 @@ fun PlayerSurface(
                             failure = null
                             buffering = true
                             autoRetried = false
+                            notice = null
+                            triedLines.clear()
+                            sourceSwitched = false
                             reloadToken++
                             onRefreshSource()
                         }
@@ -471,11 +507,25 @@ fun PlayerSurface(
                 }
             }
         } else if (buffering) {
-            CircularProgressIndicator(
-                modifier = Modifier.align(Alignment.Center).size(28.dp),
-                color = Accent.Gold,
-                strokeWidth = 2.dp,
-            )
+            Column(
+                modifier = Modifier.align(Alignment.Center),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(28.dp),
+                    color = Accent.Gold,
+                    strokeWidth = 2.dp,
+                )
+                val hint = notice
+                if (hint != null) {
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        text = hint,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0x99FFFFFF),
+                    )
+                }
+            }
         }
 
         if (showControls) {
@@ -899,22 +949,43 @@ private fun OverlayButton(text: String, onClick: () -> Unit) {
 }
 
 /** 把 ExoPlayer 的错误码翻成人话，方便判断是源的问题还是地址过期。 */
-private fun describePlaybackError(error: PlaybackException): String = when (error.errorCode) {
-    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
-    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT ->
-        "网络连接失败，源站可能已失效"
-    PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ->
-        "源站拒绝访问或地址已过期（防盗链 / 404）"
-    PlaybackException.ERROR_CODE_IO_UNSPECIFIED,
-    PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND ->
-        "播放地址不存在或已过期"
-    PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
-    PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED ->
-        "播放地址格式不支持（可能是网页而不是视频流）"
-    PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
-    PlaybackException.ERROR_CODE_DECODING_FAILED ->
-        "设备解码失败，换一个源或换一集试试"
-    else -> error.errorCodeName
+/**
+ * 播放错误的人类可读说明。
+ *
+ * 采集站最常挂的方式是「整个域名不再解析」（关站 / 换域名 / 被墙），
+ * 这时报「网络连接失败」会让人以为是 App 的问题，所以单独识别 DNS 失败。
+ */
+private fun describePlaybackError(error: PlaybackException): String {
+    if (error.causedByUnknownHost()) {
+        return "源站域名已失效（可能已关站或换了新域名），请换源或到设置里更新源地址"
+    }
+    return when (error.errorCode) {
+        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT ->
+            "网络连接失败，源站可能已失效"
+        PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ->
+            "源站拒绝访问或地址已过期（防盗链 / 404）"
+        PlaybackException.ERROR_CODE_IO_UNSPECIFIED,
+        PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND ->
+            "播放地址不存在或已过期"
+        PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+        PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED ->
+            "播放地址格式不支持（可能是网页而不是视频流）"
+        PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+        PlaybackException.ERROR_CODE_DECODING_FAILED ->
+            "设备解码失败，换一个源或换一集试试"
+        else -> error.errorCodeName
+    }
+}
+
+private fun Throwable.causedByUnknownHost(): Boolean {
+    var current: Throwable? = this
+    var depth = 0
+    while (current != null && depth++ < 10) {
+        if (current is UnknownHostException) return true
+        current = current.cause
+    }
+    return false
 }
 
 private const val HTTP_USER_AGENT =

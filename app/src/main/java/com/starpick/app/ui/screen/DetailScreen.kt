@@ -64,7 +64,6 @@ import com.starpick.app.core.model.VodItem
 import com.starpick.app.core.model.WatchProgress
 import com.starpick.app.core.model.contentKeyOf
 import com.starpick.app.core.parser.PlaylistParser
-import com.starpick.app.core.parser.isDirect
 import com.starpick.app.ui.component.EmptyState
 import com.starpick.app.ui.component.EpisodeCell
 import com.starpick.app.ui.component.FlowPosterGrid
@@ -157,13 +156,10 @@ fun DetailScreen(
             // 换到别的源时线路/集数可能都比记录少，两个下标都要 clamp，否则会黑屏。
             val lines = PlaylistParser.parse(base.playFrom, base.playUrl)
             val recorded = initialPlay.groupIndex.coerceIn(0, (lines.size - 1).coerceAtLeast(0))
-            // 记录里那条线路如果是分享页（`/share/<hash>`）就换一条真正的视频流线路：
-            // 采集站常把分享页排在第一条，默认播它只会一直转圈。
-            val groupIndex = if (lines.getOrNull(recorded)?.isDirect() == true) {
-                recorded
-            } else {
-                PlaylistParser.preferredGroupIndex(lines)
-            }
+            // 同源记录直接沿用上次那条线路：上次能播就说明这条 CDN 是通的，
+            // 按「像不像直链」重选反而可能踩到已失效的线路。跨源记录才重新挑。
+            val sameSource = initialPlay.sourceId == base.sourceId && initialPlay.vodId == base.vodId
+            val groupIndex = if (sameSource) recorded else PlaylistParser.preferredGroupIndex(lines)
             val episodeCount = lines.getOrNull(groupIndex)?.episodes?.size ?: 0
             val episodeIndex = initialPlay.episodeIndex.coerceIn(0, (episodeCount - 1).coerceAtLeast(0))
             lineIndex = groupIndex
@@ -213,11 +209,11 @@ fun DetailScreen(
             resumeRecord = record
             val lines = PlaylistParser.parse(base.playFrom, base.playUrl)
             val preferred = PlaylistParser.preferredGroupIndex(lines)
-            // 记录里那条线路若不是直链（分享页），改用像视频流的那条线路。
+            // 同源记录优先沿用上次线路（不再要求是直链：分享页靠探测也能播），
+            // 只有没记录或跨源记录时才按「像视频流」重选。
             val recorded = record
                 ?.takeIf { it.sourceId == base.sourceId && it.vodId == base.vodId }
                 ?.groupIndex
-                ?.takeIf { lines.getOrNull(it)?.isDirect() == true }
             lineIndex = (recorded ?: preferred).coerceIn(0, (lines.size - 1).coerceAtLeast(0))
             favorite = container.store.isFavorite(base.key)
         }
@@ -314,7 +310,9 @@ fun DetailScreen(
                             item = target.item,
                             groupIndex = target.groupIndex,
                             episodeIndex = target.episodeIndex,
-                            onGroupChange = { g -> playing = playing?.copy(groupIndex = g, episodeIndex = 0) },
+                            // 换线路保留当前集号：同一条片的不同线路集数基本一致，
+                            // 退回第 1 集反而丢进度（播放器内部会按新线路集数收敛）。
+                            onGroupChange = { g -> playing = playing?.copy(groupIndex = g) },
                             onEpisodeChange = { e -> playing = playing?.copy(episodeIndex = e) },
                             onExit = onBack,
                             onRefreshSource = refreshSource,
@@ -464,7 +462,12 @@ fun DetailScreen(
                                 LineChip(
                                     text = playGroup.from,
                                     selected = index == lineIndex,
-                                    onClick = { lineIndex = index },
+                                    onClick = {
+                                        lineIndex = index
+                                        // 正在播放时切线路必须真的换播放地址，
+                                        // 否则点了没反应，看起来像是这条线路不能用。
+                                        playing = playing?.copy(groupIndex = index)
+                                    },
                                 )
                             }
                         }
