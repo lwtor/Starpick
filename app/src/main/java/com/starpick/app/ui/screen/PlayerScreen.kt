@@ -8,6 +8,7 @@ import android.content.res.Configuration
 import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -229,6 +230,8 @@ fun PlayerSurface(
     var isPlaying by remember { mutableStateOf(true) }
     var positionMs by remember { mutableLongStateOf(0L) }
     var durationMs by remember { mutableLongStateOf(0L) }
+    // 已经预载（含磁盘缓存命中）到的位置，进度条用它画出「已缓存」那一段。
+    var bufferedMs by remember(player) { mutableLongStateOf(0L) }
     var lastPosition by remember { mutableStateOf(0L) }
     var lastDuration by remember { mutableStateOf(0L) }
 
@@ -322,18 +325,19 @@ fun PlayerSurface(
         while (isActive) {
             delay(500)
             val snapshot = withContext(Dispatchers.Main.immediate) {
-                Triple(
-                    player.currentPosition.coerceAtLeast(0L),
-                    player.duration.takeIf { it > 0 } ?: 0L,
-                    player.isPlaying,
+                PlayerSnapshot(
+                    position = player.currentPosition.coerceAtLeast(0L),
+                    duration = player.duration.takeIf { it > 0 } ?: 0L,
+                    playing = player.isPlaying,
+                    buffered = player.bufferedPosition.coerceAtLeast(0L),
                 )
             }
-            val (pos, dur, playing) = snapshot
-            if (!scrubbing) positionMs = pos
-            durationMs = dur
-            isPlaying = playing
-            lastPosition = pos
-            lastDuration = dur
+            if (!scrubbing) positionMs = snapshot.position
+            durationMs = snapshot.duration
+            isPlaying = snapshot.playing
+            bufferedMs = snapshot.buffered
+            lastPosition = snapshot.position
+            lastDuration = snapshot.duration
             if (++tick % 10 == 0) {
                 container.store.saveProgress(
                     WatchProgress(
@@ -550,6 +554,7 @@ fun PlayerSurface(
             isPlaying = isPlaying,
             positionMs = if (scrubbing) (scrubFraction * durationMs.toFloat()).toLong() else positionMs,
             durationMs = durationMs,
+            bufferedMs = bufferedMs,
             playbackSpeed = playbackSpeed,
             isLandscape = isLandscape,
             visible = showControls,
@@ -700,6 +705,7 @@ private fun PlayerControls(
     isPlaying: Boolean,
     positionMs: Long,
     durationMs: Long,
+    bufferedMs: Long,
     playbackSpeed: Float,
     isLandscape: Boolean,
     scrubbing: Boolean,
@@ -840,6 +846,12 @@ private fun PlayerControls(
                     fraction = if (scrubbing) scrubFraction else {
                         if (durationMs > 0) (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
                     },
+                    // 已缓存段：拖动时按松手后的目标位置算，否则用播放器的预载位置。
+                    bufferedFraction = if (durationMs > 0) {
+                        (bufferedMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+                    } else {
+                        0f
+                    },
                     scrubbing = scrubbing,
                     onScrub = onScrub,
                     onScrubFinished = onScrubFinished,
@@ -869,13 +881,17 @@ private fun PlayerControls(
 }
 
 /**
- * 播放进度条：3dp 细轨 + 9dp 小圆点，拖动时加粗放大，金色已播段。
+ * 播放进度条：3dp 细轨 + 9dp 小圆点，拖动时加粗放大。
+ *
+ * 三段配色（从暗到亮）：未缓存底色 → 已缓存段（白 55%）→ 已播段（金色）。
+ * 已缓存段带上 400ms 补间，避免 500ms 轮询带来的跳跃感。
  * 手势自己接：横向拖动改进度，点一下轨道直接跳。
  */
 @Composable
 private fun PlayerSeekBar(
     modifier: Modifier = Modifier,
     fraction: Float,
+    bufferedFraction: Float,
     scrubbing: Boolean,
     onScrub: (Float) -> Unit,
     onScrubFinished: () -> Unit,
@@ -883,6 +899,13 @@ private fun PlayerSeekBar(
     val trackHeight = if (scrubbing) 5.dp else 3.dp
     val thumbSize = if (scrubbing) 14.dp else 9.dp
     val safeFraction = fraction.coerceIn(0f, 1f)
+    // 已缓存段独立于播放点：拖动到未缓存区域时缓存段会短于金色段，直接画在金色下面即可，
+    // 不要把它拉到播放点以后，否则「没缓存的地方」会被涂成已缓存，反而误导。
+    val safeBuffered = animateFloatAsState(
+        targetValue = bufferedFraction.coerceIn(0f, 1f),
+        animationSpec = tween(durationMillis = 400),
+        label = "buffered",
+    )
 
     Box(
         modifier = modifier
@@ -908,6 +931,7 @@ private fun PlayerSeekBar(
             },
         contentAlignment = Alignment.CenterStart,
     ) {
+        // 底：尚未缓存
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -915,6 +939,15 @@ private fun PlayerSeekBar(
                 .clip(RoundedCornerShape(trackHeight / 2))
                 .background(Color(0x33FFFFFF)),
         )
+        // 中：已缓存（含磁盘缓存命中，重看时这一段会直接铺满）
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(safeBuffered.value)
+                .height(trackHeight)
+                .clip(RoundedCornerShape(trackHeight / 2))
+                .background(Color(0x8CFFFFFF)),
+        )
+        // 上：已播放
         Box(
             modifier = Modifier
                 .fillMaxWidth(safeFraction)
@@ -1030,6 +1063,14 @@ private fun Throwable.causedByUnknownHost(): Boolean {
 
 private fun formatSpeed(speed: Float): String =
     if (speed == speed.toInt().toFloat()) speed.toInt().toString() else speed.toString()
+
+/** 一次轮询拿到的播放器状态快照（必须整体在同一帧主线程读取）。 */
+private data class PlayerSnapshot(
+    val position: Long,
+    val duration: Long,
+    val playing: Boolean,
+    val buffered: Long,
+)
 
 private fun Context.findActivity(): Activity? {
     var ctx = this
