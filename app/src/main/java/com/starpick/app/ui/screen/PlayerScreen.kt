@@ -7,17 +7,25 @@ import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -35,8 +43,6 @@ import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.SkipNext
-import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -65,7 +71,9 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
@@ -393,29 +401,35 @@ fun PlayerSurface(
         }
     }
 
-    // 控制条 3.5 秒自动淡出（暂停时常驻，拖动进度时不淡出）。
-    LaunchedEffect(showControls, isPlaying, scrubbing) {
+    // 控制条 3 秒无操作自动收起（暂停时常驻，拖动进度时不收起）。
+    // epoch 每次交互 +1 → LaunchedEffect 重启 → 倒计时从头算。
+    var controlsEpoch by remember { mutableIntStateOf(0) }
+    val nudgeControls: () -> Unit = {
+        showControls = true
+        controlsEpoch++
+    }
+    LaunchedEffect(showControls, controlsEpoch, isPlaying, scrubbing) {
         if (showControls && isPlaying && !scrubbing) {
-            delay(3_500)
+            delay(3_000)
             showControls = false
         }
+    }
+
+    // 开播或换集：控制条重新出现，给用户一个「这是哪一集」的确认。
+    LaunchedEffect(currentUrl) {
+        showControls = true
+        controlsEpoch++
     }
 
     val togglePlay: () -> Unit = {
         player.playWhenReady = !player.playWhenReady
         isPlaying = player.playWhenReady
-        showControls = true
-    }
-    val seekBy: (Long) -> Unit = { delta ->
-        val target = (player.currentPosition + delta).coerceIn(0L, durationMs.coerceAtLeast(0L))
-        player.seekTo(target)
-        positionMs = target
-        showControls = true
+        nudgeControls()
     }
     val playEpisode: (Int) -> Unit = { index ->
         onEpisodeChange(index.coerceIn(0, (episodes.size - 1).coerceAtLeast(0)))
         showSheet = false
-        showControls = true
+        nudgeControls()
     }
 
     Box(modifier = modifier.background(Color.Black)) {
@@ -437,13 +451,19 @@ fun PlayerSurface(
             modifier = Modifier.fillMaxSize(),
         )
 
-        // 整块区域的点击：单击显隐控制条，双击播放 / 暂停。
+        // 整块区域的点击：单击切换控制条显隐，双击播放 / 暂停。
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .pointerInput(Unit) {
                     detectTapGestures(
-                        onTap = { showControls = !showControls },
+                        onTap = {
+                            if (showControls) {
+                                showControls = false
+                            } else {
+                                nudgeControls()
+                            }
+                        },
                         onDoubleTap = { togglePlay() },
                     )
                 },
@@ -528,56 +548,56 @@ fun PlayerSurface(
             }
         }
 
-        if (showControls) {
-            PlayerControls(
-                title = item.title,
-                episodeName = currentName ?: "",
-                isPlaying = isPlaying,
-                positionMs = if (scrubbing) (scrubFraction * durationMs.toFloat()).toLong() else positionMs,
-                durationMs = durationMs,
-                playbackSpeed = playbackSpeed,
-                hasPrev = safeEpisode > 0,
-                hasNext = safeEpisode < episodes.size - 1,
-                isLandscape = isLandscape,
-                onBack = { if (isLandscape) exitFullscreen() else onExit() },
-                onTogglePlay = togglePlay,
-                onSeekBy = seekBy,
-                onPrev = { playEpisode(safeEpisode - 1) },
-                onNext = { playEpisode(safeEpisode + 1) },
-                onSpeed = {
-                    playbackSpeed = when (playbackSpeed) {
-                        1f -> 1.25f
-                        1.25f -> 1.5f
-                        1.5f -> 2f
-                        else -> 1f
-                    }
-                },
-                onEpisodes = { showSheet = true },
-                onFullscreen = {
-                    activity?.requestedOrientation = if (isLandscape) {
-                        ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-                    } else {
-                        ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                    }
-                },
-                scrubbing = scrubbing,
-                scrubFraction = scrubFraction,
-                onScrub = {
-                    scrubbing = true
-                    scrubFraction = it
-                    showControls = true
-                },
-                onScrubFinished = {
-                    // 时长还没拿到时不 seek，否则会把进度打到 0。
-                    if (durationMs > 0) {
-                        val target = (scrubFraction * durationMs.toFloat()).toLong()
-                        player.seekTo(target)
-                        positionMs = target
-                    }
-                    scrubbing = false
-                },
-            )
-        }
+        PlayerControls(
+            title = item.title,
+            episodeName = currentName ?: "",
+            isPlaying = isPlaying,
+            positionMs = if (scrubbing) (scrubFraction * durationMs.toFloat()).toLong() else positionMs,
+            durationMs = durationMs,
+            playbackSpeed = playbackSpeed,
+            isLandscape = isLandscape,
+            visible = showControls,
+            onBack = { if (isLandscape) exitFullscreen() else onExit() },
+            onTogglePlay = togglePlay,
+            onSpeed = {
+                playbackSpeed = when (playbackSpeed) {
+                    1f -> 1.25f
+                    1.25f -> 1.5f
+                    1.5f -> 2f
+                    else -> 1f
+                }
+                nudgeControls()
+            },
+            onEpisodes = {
+                showSheet = true
+                nudgeControls()
+            },
+            onFullscreen = {
+                activity?.requestedOrientation = if (isLandscape) {
+                    ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                } else {
+                    ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                }
+                nudgeControls()
+            },
+            scrubbing = scrubbing,
+            scrubFraction = scrubFraction,
+            onScrub = {
+                scrubbing = true
+                scrubFraction = it
+                showControls = true
+            },
+            onScrubFinished = {
+                // 时长还没拿到时不 seek，否则会把进度打到 0。
+                if (durationMs > 0) {
+                    val target = (scrubFraction * durationMs.toFloat()).toLong()
+                    player.seekTo(target)
+                    positionMs = target
+                }
+                scrubbing = false
+                nudgeControls()
+            },
+        )
     }
 
     if (showSheet) {
@@ -671,7 +691,12 @@ fun PlayerSurface(
     }
 }
 
-/** 控制层：顶部渐变 + 中央播放键 + 底部进度与功能行。 */
+/**
+ * 控制层：顶部标题条 + 底部播放条，两条各自带出入动画。
+ *
+ * 顶栏从上往下滑入、底栏从下往上滑入，隐藏时反向滑出并淡出，
+ * 滑块式而不是硬切，暂停/播放时不会「闪」一下。
+ */
 @Composable
 private fun PlayerControls(
     title: String,
@@ -680,128 +705,163 @@ private fun PlayerControls(
     positionMs: Long,
     durationMs: Long,
     playbackSpeed: Float,
-    hasPrev: Boolean,
-    hasNext: Boolean,
     isLandscape: Boolean,
     scrubbing: Boolean,
     scrubFraction: Float,
+    visible: Boolean,
     onBack: () -> Unit,
     onTogglePlay: () -> Unit,
-    onSeekBy: (Long) -> Unit,
-    onPrev: () -> Unit,
-    onNext: () -> Unit,
     onSpeed: () -> Unit,
     onEpisodes: () -> Unit,
     onFullscreen: () -> Unit,
     onScrub: (Float) -> Unit,
     onScrubFinished: () -> Unit,
 ) {
-    Box(modifier = Modifier.fillMaxSize()) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(90.dp)
-                .background(
-                    Brush.verticalGradient(
-                        colorStops = arrayOf(
-                            0f to Color(0xB3000000),
-                            1f to Color.Transparent,
-                        ),
-                    ),
-                ),
-        )
+    val duration = 240
+    val slide = tween<IntOffset>(durationMillis = duration)
+    val fade = tween<Float>(durationMillis = duration)
+    // 顶栏热区吃掉点击，避免点标题条空白处把控制条关掉。
+    val swallowTap = Modifier.clickable(
+        interactionSource = remember { MutableInteractionSource() },
+        indication = null,
+        onClick = {},
+    )
 
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 6.dp, end = 12.dp, top = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
+    Box(modifier = Modifier.fillMaxSize()) {
+        AnimatedVisibility(
+            visible = visible,
+            modifier = Modifier.align(Alignment.TopCenter),
+            enter = slideInVertically(animationSpec = slide) { -it } + fadeIn(animationSpec = fade),
+            exit = slideOutVertically(animationSpec = slide) { -it } + fadeOut(animationSpec = fade),
         ) {
-            IconHit(onBack, Icons.AutoMirrored.Filled.ArrowBack, "返回")
-            Column(Modifier.weight(1f)) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleSmall,
-                    color = Color.White,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                if (episodeName.isNotBlank()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(
+                            colorStops = arrayOf(
+                                0f to Color(0xC9000000),
+                                0.65f to Color(0x66000000),
+                                1f to Color.Transparent,
+                            ),
+                        ),
+                    )
+                    .then(swallowTap)
+                    .then(if (isLandscape) Modifier.displayCutoutPadding() else Modifier)
+                    .padding(start = 2.dp, end = 8.dp, top = 2.dp, bottom = 18.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconHit(onBack, Icons.AutoMirrored.Filled.ArrowBack, "返回")
+                Column(Modifier.weight(1f).padding(end = 4.dp)) {
                     Text(
-                        text = episodeName,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color(0x99FFFFFF),
+                        text = title,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = Color.White,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    if (episodeName.isNotBlank()) {
+                        Text(
+                            text = episodeName,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0x99FFFFFF),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
-            }
-            Text(
-                text = "${formatSpeed(playbackSpeed)}x",
-                style = MaterialTheme.typography.labelMedium,
-                color = Accent.Gold,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .clickable(onClick = onSpeed)
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
-            )
-        }
-
-        Row(
-            modifier = Modifier.align(Alignment.Center),
-            horizontalArrangement = Arrangement.spacedBy(if (isLandscape) 40.dp else 22.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (hasPrev) {
-                IconHit(onPrev, Icons.Filled.SkipPrevious, "上一集", 40.dp)
-            }
-            TextAction("−10s") { onSeekBy(-10_000L) }
-            PlayPauseButton(isPlaying, onTogglePlay, big = isLandscape)
-            TextAction("+10s") { onSeekBy(10_000L) }
-            if (hasNext) {
-                IconHit(onNext, Icons.Filled.SkipNext, "下一集", 40.dp)
-            }
-        }
-
-        Column(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .background(
-                    Brush.verticalGradient(
-                        colorStops = arrayOf(
-                            0f to Color.Transparent,
-                            1f to Color(0xCC000000),
-                        ),
-                    ),
+                TextAction("选集", onClick = onEpisodes)
+                Text(
+                    text = "${formatSpeed(playbackSpeed)}x",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Accent.Gold,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(onClick = onSpeed)
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
                 )
-                .padding(horizontal = 12.dp, vertical = 6.dp),
+            }
+        }
+
+        AnimatedVisibility(
+            visible = visible,
+            modifier = Modifier.align(Alignment.BottomCenter),
+            enter = slideInVertically(animationSpec = slide) { it } + fadeIn(animationSpec = fade),
+            exit = slideOutVertically(animationSpec = slide) { it } + fadeOut(animationSpec = fade),
         ) {
-            PlayerSeekBar(
-                fraction = if (scrubbing) scrubFraction else {
-                    if (durationMs > 0) (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
-                },
-                scrubbing = scrubbing,
-                onScrub = onScrub,
-                onScrubFinished = onScrubFinished,
-            )
             Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(
+                            colorStops = arrayOf(
+                                0f to Color.Transparent,
+                                0.4f to Color(0x73000000),
+                                1f to Color(0xE6000000),
+                            ),
+                        ),
+                    )
+                    .then(swallowTap)
+                    .padding(start = 4.dp, end = 4.dp, top = 16.dp, bottom = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                // 左：播放 / 暂停
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .clickable(onClick = onTogglePlay),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                        contentDescription = if (isPlaying) "暂停" else "播放",
+                        tint = Color.White,
+                        modifier = Modifier.size(26.dp),
+                    )
+                }
+
+                // 左：当前进度
                 Text(
-                    text = "${formatPosition(positionMs)} / ${formatPosition(durationMs)}",
+                    text = formatPosition(positionMs),
                     style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xB3FFFFFF),
+                    color = Color(0xE6FFFFFF),
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    modifier = Modifier.width(50.dp),
                 )
-                Spacer(Modifier.weight(1f))
-                TextAction("选集", onClick = onEpisodes)
+
+                // 中：进度条
+                PlayerSeekBar(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(horizontal = 2.dp),
+                    fraction = if (scrubbing) scrubFraction else {
+                        if (durationMs > 0) (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
+                    },
+                    scrubbing = scrubbing,
+                    onScrub = onScrub,
+                    onScrubFinished = onScrubFinished,
+                )
+
+                // 右：总时长
+                Text(
+                    text = formatPosition(durationMs),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0x99FFFFFF),
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    modifier = Modifier.width(56.dp),
+                )
+
+                // 右：全屏切换
                 IconHit(
                     onClick = onFullscreen,
                     icon = if (isLandscape) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
                     description = "全屏",
-                    size = 34.dp,
+                    size = 38.dp,
+                    iconSize = 22.dp,
                 )
             }
         }
@@ -814,6 +874,7 @@ private fun PlayerControls(
  */
 @Composable
 private fun PlayerSeekBar(
+    modifier: Modifier = Modifier,
     fraction: Float,
     scrubbing: Boolean,
     onScrub: (Float) -> Unit,
@@ -824,9 +885,8 @@ private fun PlayerSeekBar(
     val safeFraction = fraction.coerceIn(0f, 1f)
 
     Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(26.dp)
+        modifier = modifier
+            .height(28.dp)
             .pointerInput(Unit) {
                 detectDragGestures(
                     onDragStart = { offset ->
@@ -877,27 +937,6 @@ private fun PlayerSeekBar(
 }
 
 @Composable
-private fun PlayPauseButton(isPlaying: Boolean, onClick: () -> Unit, big: Boolean = false) {
-    val size = if (big) 62.dp else 52.dp
-    Box(
-        modifier = Modifier
-            .size(size)
-            .clip(RoundedCornerShape(size / 2))
-            .background(Color(0x2EFFFFFF))
-            .border(1.dp, Color(0x47FFFFFF), RoundedCornerShape(size / 2))
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(
-            imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-            contentDescription = if (isPlaying) "暂停" else "播放",
-            tint = Color.White,
-            modifier = Modifier.size(if (big) 26.dp else 22.dp),
-        )
-    }
-}
-
-@Composable
 private fun TextAction(text: String, onClick: () -> Unit) {
     Text(
         text = text,
@@ -916,6 +955,7 @@ private fun IconHit(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     description: String,
     size: androidx.compose.ui.unit.Dp = 40.dp,
+    iconSize: androidx.compose.ui.unit.Dp = size * 0.45f,
 ) {
     Box(
         modifier = Modifier
@@ -928,7 +968,7 @@ private fun IconHit(
             imageVector = icon,
             contentDescription = description,
             tint = Color.White,
-            modifier = Modifier.size(size * 0.45f),
+            modifier = Modifier.size(iconSize),
         )
     }
 }
