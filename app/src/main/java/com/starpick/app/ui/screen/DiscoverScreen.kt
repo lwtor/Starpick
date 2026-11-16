@@ -14,14 +14,18 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -110,9 +114,16 @@ fun DiscoverScreen(
         error != null && subjects.isEmpty() -> EmptyHint("加载失败", error ?: "")
 
         else -> LazyColumn(
-            modifier = Modifier.fillMaxSize().statusBarsPadding(),
-            contentPadding = PaddingValues(vertical = 8.dp),
+            // 注意：外层 Scaffold 已经把状态栏高度算进 contentPadding 了，
+            // 这里再叠 statusBarsPadding 会变成双倍空白 —— 顶部那条「巨大空条」就是这么来的。
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(bottom = 8.dp),
         ) {
+            // 品牌头部（原来这里是一片空白）
+            item {
+                DiscoverHeader(onRefresh = { load() })
+            }
+
             // 分类切换
             item {
                 CategoryTabs(selected = tab, onSelect = { tab = it })
@@ -173,6 +184,44 @@ fun DiscoverScreen(
             }
 
             item { Spacer(Modifier.height(8.dp)) }
+        }
+    }
+}
+
+/** 顶部品牌栏：左「星匣」+ 副标题，右侧刷新。高度约 56dp，不占大块空白。 */
+@Composable
+private fun DiscoverHeader(onRefresh: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = Icons.Filled.Star,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(18.dp),
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = "星匣",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = "豆瓣实时热门",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.weight(1f))
+        IconButton(onClick = onRefresh) {
+            Icon(
+                imageVector = Icons.Filled.Refresh,
+                contentDescription = "刷新榜单",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
