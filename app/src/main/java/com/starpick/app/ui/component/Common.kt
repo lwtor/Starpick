@@ -260,6 +260,9 @@ fun MediaRow(
     modifier: Modifier = Modifier,
     progress: Float? = null,
     enabled: Boolean = true,
+    /** 编辑模式下的勾选框；普通模式传 null，布局与原来完全一致。 */
+    leading: (@Composable () -> Unit)? = null,
+    showChevron: Boolean = true,
     onClick: () -> Unit,
 ) {
     Row(
@@ -270,6 +273,10 @@ fun MediaRow(
             .padding(horizontal = 20.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (leading != null) {
+            leading()
+            Spacer(Modifier.width(12.dp))
+        }
         Box(modifier = Modifier.width(112.dp).height(63.dp)) {
             VodCover(
                 title = title,
@@ -305,12 +312,14 @@ fun MediaRow(
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        Icon(
-            imageVector = Icons.Filled.ChevronRight,
-            contentDescription = null,
-            tint = Ink.Text3,
-            modifier = Modifier.size(18.dp),
-        )
+        if (showChevron) {
+            Icon(
+                imageVector = Icons.Filled.ChevronRight,
+                contentDescription = null,
+                tint = Ink.Text3,
+                modifier = Modifier.size(18.dp),
+            )
+        }
     }
 }
 

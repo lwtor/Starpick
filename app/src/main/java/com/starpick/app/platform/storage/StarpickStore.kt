@@ -106,8 +106,11 @@ class StarpickStore(context: Context) : SourceRepository, LibraryRepository {
         )
     }
 
-    override suspend fun clearProgress(key: String) = mutate { snapshot ->
-        snapshot.copy(progress = snapshot.progress.filterNot { it.key == key })
+    override suspend fun clearProgress(key: String) = clearProgress(setOf(key))
+
+    /** 批量删除观看记录：一次改内存 + 一次落盘，编辑模式下多选删除走这里。 */
+    suspend fun clearProgress(keys: Collection<String>) = mutate { snapshot ->
+        snapshot.copy(progress = snapshot.progress.filterNot { it.key in keys })
     }
 
     /** 搜索历史：最近搜过的排前面，重复关键词去重后提升到首位。 */
