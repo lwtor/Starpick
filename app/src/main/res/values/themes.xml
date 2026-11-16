@@ -1,7 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.Starpick" parent="android:style/Theme.Material.Light.NoActionBar">
+    <!-- 深色设计语言：透明系统栏 + 浅色图标，具体样式由 Activity 里 enableEdgeToEdge 兜底。 -->
+    <style name="Theme.Starpick" parent="android:style/Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/surface</item>
-        <item name="android:statusBarColor">@color/surface</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
     </style>
 </resources>

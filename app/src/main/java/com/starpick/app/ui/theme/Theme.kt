@@ -1,36 +1,42 @@
 package com.starpick.app.ui.theme
 
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Typography
-import androidx.compose.material3.lightColorScheme
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
-// 品牌蓝为主色，辅以暖金点缀（呼应「星匣」的星空与收藏感）。
-private val StarBoxColors = lightColorScheme(
-    primary = Color(0xFF1D4E89),
-    onPrimary = Color(0xFFFFFFFF),
-    primaryContainer = Color(0xFFD7E7FB),
-    onPrimaryContainer = Color(0xFF0B2E57),
-    secondary = Color(0xFFB87514),
-    onSecondary = Color(0xFFFFFFFF),
-    secondaryContainer = Color(0xFFFBE2BC),
-    onSecondaryContainer = Color(0xFF523000),
-    tertiary = Color(0xFF3E6B54),
-    background = Color(0xFFF7F5F0),
-    onBackground = Color(0xFF191C20),
-    surface = Color(0xFFFFFFFF),
-    onSurface = Color(0xFF191C20),
-    surfaceVariant = Color(0xFFE7E4DE),
-    onSurfaceVariant = Color(0xFF5E6066),
-    outline = Color(0xFF8B8D93),
+private val StarColors = darkColorScheme(
+    primary = Accent.Brand,
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFF16305A),
+    onPrimaryContainer = Color(0xFFD7E7FB),
+    secondary = Accent.Gold,
+    onSecondary = Color(0xFF1A1200),
+    secondaryContainer = Color(0xFF3A2A0A),
+    onSecondaryContainer = Accent.Gold,
+    tertiary = Accent.Online,
+    onTertiary = Color(0xFF03281C),
+    background = Ink.Base,
+    onBackground = Ink.Text1,
+    surface = Ink.Card,
+    onSurface = Ink.Text1,
+    surfaceVariant = Ink.Selected,
+    onSurfaceVariant = Ink.Text2,
+    surfaceTint = Accent.Brand,
+    inverseSurface = Ink.Text1,
+    inverseOnSurface = Ink.Base,
+    error = Accent.New,
+    onError = Color.White,
+    outline = Ink.Text3,
+    outlineVariant = Ink.Line,
+    scrim = Color(0xCC000000),
 )
 
 @Composable
 fun StarpickTheme(content: @Composable () -> Unit) {
     MaterialTheme(
-        colorScheme = StarBoxColors,
-        typography = Typography(),
+        colorScheme = StarColors,
+        typography = StarTypography,
         content = content,
     )
 }

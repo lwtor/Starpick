@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="surface">#FFFBFE</color>
+    <!-- 深色设计：窗口底色与状态栏统一用 ink-900，冷启动不会先闪白再变黑。 -->
+    <color name="surface">#0A0E14</color>
     <color name="ic_launcher_background">#101828</color>
 </resources>

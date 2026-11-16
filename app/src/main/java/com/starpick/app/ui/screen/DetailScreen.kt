@@ -1,7 +1,10 @@
 package com.starpick.app.ui.screen
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -15,16 +18,15 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.Button
-import androidx.compose.material3.FilterChip
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.BookmarkBorder
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -35,20 +37,42 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
+import coil3.request.crossfade
 import com.starpick.app.AppContainer
 import com.starpick.app.core.model.SearchGroup
 import com.starpick.app.core.model.VodItem
 import com.starpick.app.core.model.WatchProgress
 import com.starpick.app.core.parser.PlaylistParser
-import com.starpick.app.ui.component.EmptyHint
+import com.starpick.app.ui.component.EmptyState
+import com.starpick.app.ui.component.EpisodeCell
 import com.starpick.app.ui.component.FlowPosterGrid
-import com.starpick.app.ui.component.SectionTitle
+import com.starpick.app.ui.component.LineChip
+import com.starpick.app.ui.component.PrimaryButton
+import com.starpick.app.ui.component.SectionHeader
+import com.starpick.app.ui.component.SquareIconButton
 import com.starpick.app.ui.component.VodCover
+import com.starpick.app.ui.theme.Ink
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/**
+ * 详情：海报模糊铺底 + 片名/评分区 + 主 CTA + 来源/线路/选集。
+ *
+ * 主 CTA 优先写「继续观看 S01E03」而不是「播放」—— 用户要的是接着看，不是从头看。
+ * 本页不在 Scaffold 内，状态栏 inset 必须自己加，否则返回键会被状态栏压住。
+ */
 @Composable
 fun DetailScreen(
     container: AppContainer,
@@ -59,22 +83,16 @@ fun DetailScreen(
     val scope = rememberCoroutineScope()
     val sources by container.store.sources.collectAsState(initial = emptyList())
 
-    // 防御：SearchGroup.items 理论非空，但空值时直接给空态而非崩溃。
+    // 防御：SearchGroup.items 理论非空，空值时给空态而非崩溃。
     if (group.items.isEmpty()) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .statusBarsPadding()
-                    .padding(horizontal = 4.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconButton(onClick = onBack) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                }
-                Text("该条目没有可用的来源", style = MaterialTheme.typography.titleMedium)
-            }
-            EmptyHint("暂无播放来源", "换一个源或重新搜索")
+        Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
+            BackRow(title = "该条目没有可用的来源", onBack = onBack)
+            EmptyState(
+                title = "暂无播放来源",
+                description = "换一个源或重新搜索",
+                actionLabel = "返回",
+                onAction = onBack,
+            )
         }
         return
     }
@@ -84,14 +102,15 @@ fun DetailScreen(
     var favorite by remember(group) { mutableStateOf(false) }
     var resumeRecord by remember(group) { mutableStateOf<WatchProgress?>(null) }
     var lineIndex by remember(group) { mutableStateOf(0) }
+    var expanded by remember(group) { mutableStateOf(false) }
 
     LaunchedEffect(group) {
         container.store.rememberItem(group.items.first())
     }
 
     // 搜索结果里有些源不给播放串，换源或取详情时补一次。
-    // 关键：依赖 sources 一起作为 key，等 sources 收集到之后才补详情，避免拿空列表直接放弃；
-    // 网络请求切 IO 线程，整体 try-catch 兜底，任何异常都不能把详情页带崩。
+    // 依赖 sources 一起作为 key，等 sources 收集到之后再补，避免拿空列表直接放弃；
+    // 网络请求切 IO，整体 try-catch 兜底，任何异常都不能把详情页带崩。
     LaunchedEffect(selected, sources) {
         runCatching {
             var base = selected
@@ -113,182 +132,322 @@ fun DetailScreen(
     val playGroups = remember(resolved) {
         PlaylistParser.parse(resolved.playFrom, resolved.playUrl)
     }
+    val episodes = playGroups.getOrNull(lineIndex)?.episodes.orEmpty()
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        // 顶部返回栏。详情页不在 Scaffold 里，状态栏 inset 必须自己加，否则返回键会被状态栏压住。
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(bottom = 28.dp),
+    ) {
+        item {
+            DetailHeader(
+                item = resolved,
+                favorite = favorite,
+                onBack = onBack,
+                onToggleFavorite = {
+                    scope.launch {
+                        container.store.toggleFavorite(resolved)
+                        favorite = container.store.isFavorite(resolved.key)
+                    }
+                },
+            )
+        }
+
+        item {
+            Row(
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                val record = resumeRecord
+                val label = when {
+                    record != null -> "继续观看 ${record.episodeName.ifBlank { "上次进度" }}"
+                    episodes.isNotEmpty() -> "播放第 1 集"
+                    else -> "暂无播放地址"
+                }
+                PrimaryButton(
+                    text = label,
+                    icon = Icons.Filled.PlayArrow,
+                    modifier = Modifier.weight(1f),
+                    enabled = record != null || episodes.isNotEmpty(),
+                    onClick = {
+                        if (record != null) {
+                            onPlay(resolved, record.groupIndex, record.episodeIndex)
+                        } else if (episodes.isNotEmpty()) {
+                            onPlay(resolved, lineIndex, 0)
+                        }
+                    },
+                )
+                SquareIconButton(
+                    icon = if (favorite) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
+                    contentDescription = "收藏",
+                    active = favorite,
+                    onClick = {
+                        scope.launch {
+                            container.store.toggleFavorite(resolved)
+                            favorite = container.store.isFavorite(resolved.key)
+                        }
+                    },
+                )
+            }
+        }
+
+        if (resolved.description.isNotBlank()) {
+            item {
+                Column(Modifier.padding(horizontal = 20.dp)) {
+                    Text(
+                        text = resolved.description.take(300),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Ink.Text2,
+                        maxLines = if (expanded) Int.MAX_VALUE else 4,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (resolved.description.length > 120) {
+                        Text(
+                            text = if (expanded) "收起" else "展开",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Ink.Text3,
+                            modifier = Modifier
+                                .padding(top = 6.dp)
+                                .clickable { expanded = !expanded },
+                        )
+                    }
+                }
+            }
+        }
+
+        // 换源：同一部片在不同源里的集数不同，放在选集之前让人先选源。
+        if (group.items.size > 1) {
+            item { SectionHeader(title = "来源", trailing = "${group.items.size} 个") }
+            item {
+                Row(
+                    modifier = Modifier
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 20.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    group.items.forEach { item ->
+                        LineChip(
+                            text = item.sourceName,
+                            selected = item.key == selected.key,
+                            onClick = { selected = item },
+                        )
+                    }
+                }
+            }
+        }
+
+        if (playGroups.size > 1) {
+            item { SectionHeader(title = "线路", trailing = "${playGroups.size} 条") }
+            item {
+                Row(
+                    modifier = Modifier
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 20.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    playGroups.forEachIndexed { index, playGroup ->
+                        LineChip(
+                            text = playGroup.from,
+                            selected = index == lineIndex,
+                            onClick = { lineIndex = index },
+                        )
+                    }
+                }
+            }
+        }
+
+        item {
+            SectionHeader(
+                title = "选集",
+                trailing = if (episodes.isEmpty()) null else "共 ${episodes.size} 集",
+            )
+        }
+
+        item {
+            if (episodes.isEmpty()) {
+                Text(
+                    text = "该源没有返回播放地址，可换一个源或检查采集站配置",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Ink.Text2,
+                    modifier = Modifier.padding(horizontal = 20.dp),
+                )
+            } else {
+                val record = resumeRecord
+                FlowPosterGrid(
+                    columns = 5,
+                    itemCount = episodes.size,
+                    modifier = Modifier.padding(horizontal = 20.dp),
+                    horizontalSpacing = 8.dp,
+                    verticalSpacing = 8.dp,
+                ) { index, itemModifier ->
+                    val currentEp = if (record != null && record.groupIndex == lineIndex) {
+                        record.episodeIndex
+                    } else {
+                        -1
+                    }
+                    EpisodeCell(
+                        label = "${index + 1}",
+                        modifier = itemModifier,
+                        selected = currentEp == index,
+                        seen = currentEp > index,
+                        onClick = { onPlay(resolved, lineIndex, index) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** 头部：海报模糊铺底 + 返回 + 海报 / 片名 / 元信息。 */
+@Composable
+private fun DetailHeader(
+    item: VodItem,
+    favorite: Boolean,
+    onBack: () -> Unit,
+    onToggleFavorite: () -> Unit,
+) {
+    Box(modifier = Modifier.fillMaxWidth().height(300.dp)) {
+        AsyncImage(
+            model = ImageRequest.Builder(LocalContext.current)
+                .data(item.cover)
+                .crossfade(true)
+                .build(),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .fillMaxSize()
+                .blur(22.dp)
+                .background(Ink.Card),
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        colorStops = arrayOf(
+                            0f to Color(0x990A0E14),
+                            0.45f to Color(0x660A0E14),
+                            0.82f to Color(0xE60A0E14),
+                            1f to Ink.Base,
+                        ),
+                    ),
+                ),
+        )
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .statusBarsPadding()
-                .padding(horizontal = 4.dp, vertical = 4.dp),
+                .padding(horizontal = 8.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(Color(0x6606080C))
+                    .clickable(onClick = onBack),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "返回",
+                    tint = Color.White,
+                    modifier = Modifier.size(18.dp),
+                )
             }
-            Text(
-                text = resolved.title,
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = 1,
+            Spacer(Modifier.weight(1f))
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(Color(0x6606080C))
+                    .clickable(onClick = onToggleFavorite),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = if (favorite) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
+                    contentDescription = "收藏",
+                    tint = if (favorite) Color(0xFFF6BE4F) else Color.White,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
+
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 16.dp),
+        ) {
+            VodCover(
+                title = item.title,
+                cover = item.cover,
+                modifier = Modifier.size(width = 96.dp, height = 136.dp),
+                shape = RoundedCornerShape(10.dp),
+            )
+            Spacer(Modifier.width(15.dp))
+            Column(Modifier.weight(1f).padding(bottom = 4.dp)) {
+                Text(
+                    text = item.title,
+                    style = MaterialTheme.typography.titleLarge,
+                    color = Color.White,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(7.dp))
+                Text(
+                    text = listOfNotNull(
+                        item.year.takeIf { it.isNotBlank() },
+                        item.area.takeIf { it.isNotBlank() },
+                        item.category.takeIf { it.isNotBlank() },
+                    ).joinToString(" · ").ifBlank { item.sourceName },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Color(0xB3FFFFFF),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (item.remark.isNotBlank()) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = item.remark,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color(0xFFF6BE4F),
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BackRow(title: String, onBack: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .clip(RoundedCornerShape(22.dp))
+                .clickable(onClick = onBack),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                contentDescription = "返回",
+                tint = Ink.Text1,
+                modifier = Modifier.size(20.dp),
             )
         }
-
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            // 海报 + 信息头
-            item {
-                Row {
-                    VodCover(
-                        title = resolved.title,
-                        cover = resolved.cover,
-                        modifier = Modifier.size(width = 110.dp, height = 154.dp),
-                    )
-                    Spacer(Modifier.width(16.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            text = resolved.title,
-                            style = MaterialTheme.typography.titleLarge,
-                            maxLines = 2,
-                        )
-                        Spacer(Modifier.height(6.dp))
-                        Text(
-                            text = listOfNotNull(
-                                resolved.year.takeIf { it.isNotBlank() },
-                                resolved.area.takeIf { it.isNotBlank() },
-                                resolved.category.takeIf { it.isNotBlank() },
-                            ).joinToString(" · "),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        resolved.remark.takeIf { it.isNotBlank() }?.let {
-                            Spacer(Modifier.height(4.dp))
-                            Text(
-                                text = it,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.secondary,
-                            )
-                        }
-                    }
-                }
-            }
-
-            // 操作按钮
-            item {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = {
-                            scope.launch {
-                                container.store.toggleFavorite(resolved)
-                                favorite = container.store.isFavorite(resolved.key)
-                            }
-                        },
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text(if (favorite) "已收进片匣" else "加入片匣")
-                    }
-                    resumeRecord?.let { record ->
-                        OutlinedButton(
-                            onClick = { onPlay(resolved, record.groupIndex, record.episodeIndex) },
-                            modifier = Modifier.weight(1f),
-                        ) {
-                            Text("继续看 ${record.episodeName}")
-                        }
-                    }
-                }
-            }
-
-            // 简介
-            if (resolved.description.isNotBlank()) {
-                item {
-                    Column {
-                        SectionTitle("简介")
-                        Text(
-                            text = resolved.description.take(300),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-
-            // 来源选择
-            if (group.items.size > 1) {
-                item {
-                    Column {
-                        SectionTitle("来源")
-                        Row(
-                            modifier = Modifier.horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            group.items.forEach { item ->
-                                FilterChip(
-                                    selected = item == selected,
-                                    onClick = { selected = item },
-                                    label = { Text(item.sourceName) },
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 线路选择
-            if (playGroups.size > 1) {
-                item {
-                    Row(
-                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        playGroups.forEachIndexed { index, playGroup ->
-                            FilterChip(
-                                selected = index == lineIndex,
-                                onClick = { lineIndex = index },
-                                label = { Text(playGroup.from) },
-                            )
-                        }
-                    }
-                }
-            }
-
-            // 选集
-            item {
-                Column {
-                    SectionTitle("选集")
-                    if (playGroups.isEmpty()) {
-                        Text(
-                            "该源没有返回播放地址，可换一个源或检查采集站配置",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    } else {
-                        val episodes = playGroups.getOrNull(lineIndex)?.episodes.orEmpty()
-                        Text(
-                            text = "共 ${episodes.size} 集",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        // 选集按钮：手写分行（每行 5 个），不能嵌套 LazyVerticalGrid（与 LazyColumn 冲突崩溃）。
-                        FlowPosterGrid(
-                            columns = 5,
-                            itemCount = episodes.size,
-                            horizontalSpacing = 8.dp,
-                            verticalSpacing = 8.dp,
-                        ) { index, itemModifier ->
-                            OutlinedButton(
-                                onClick = { onPlay(resolved, lineIndex, index) },
-                                contentPadding = PaddingValues(4.dp),
-                                modifier = itemModifier,
-                            ) {
-                                Text("${index + 1}")
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium,
+            color = Ink.Text1,
+            maxLines = 1,
+        )
     }
 }

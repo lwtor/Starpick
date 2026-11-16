@@ -2,28 +2,31 @@ package com.starpick.app.ui.nav
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.Explore
-import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.CenterAlignedTopAppBar
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material.icons.filled.VideoLibrary
+import androidx.compose.material.icons.outlined.Explore
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.VideoLibrary
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.unit.dp
 import com.starpick.app.AppContainer
 import com.starpick.app.core.model.SearchGroup
 import com.starpick.app.core.model.VodItem
@@ -34,6 +37,8 @@ import com.starpick.app.ui.screen.PlayerScreen
 import com.starpick.app.ui.screen.ResolvingScreen
 import com.starpick.app.ui.screen.SearchScreen
 import com.starpick.app.ui.screen.SettingsScreen
+import com.starpick.app.ui.theme.Accent
+import com.starpick.app.ui.theme.Ink
 
 /**
  * 极简状态导航：一个返回栈，不引入 Navigation 库。
@@ -53,16 +58,16 @@ private data class TabSpec(
     val screen: Screen,
     val label: String,
     val icon: ImageVector,
+    val iconSelected: ImageVector,
 )
 
 private val tabs = listOf(
-    TabSpec(Screen.Discover, "首页", Icons.Filled.Explore),
-    TabSpec(Screen.Home, "片匣", Icons.Filled.Home),
-    TabSpec(Screen.Search, "搜索", Icons.Filled.Search),
-    TabSpec(Screen.Settings, "设置", Icons.Filled.Settings),
+    TabSpec(Screen.Discover, "首页", Icons.Outlined.Explore, Icons.Filled.Explore),
+    TabSpec(Screen.Home, "片匣", Icons.Outlined.VideoLibrary, Icons.Filled.VideoLibrary),
+    TabSpec(Screen.Search, "搜索", Icons.Outlined.Search, Icons.Filled.Search),
+    TabSpec(Screen.Settings, "设置", Icons.Outlined.Settings, Icons.Filled.Settings),
 )
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StarpickNav(container: AppContainer) {
     val stack = remember { mutableStateListOf<Screen>(Screen.Discover) }
@@ -73,7 +78,7 @@ fun StarpickNav(container: AppContainer) {
         stack.add(tab)
     }
 
-    // 只在栈深 > 1 时拦截返回；栈深 == 1 时放行给系统（首页/根 tab 返回即退出）。
+    // 只在栈深 > 1 时拦截返回；栈深 == 1 时放行给系统（根 tab 返回即退出）。
     BackHandler(enabled = stack.size > 1) { pop() }
 
     when (current) {
@@ -102,26 +107,12 @@ fun StarpickNav(container: AppContainer) {
         )
 
         else -> {
-            val title = when (current) {
-                is Screen.Discover -> "星匣"
-                is Screen.Home -> "片匣"
-                is Screen.Search -> "搜索"
-                is Screen.Settings -> "设置"
-            }
             Scaffold(
-                // 首页（Discover）做沉浸式，不显示顶部栏，让英雄横幅顶到状态栏下；
-                // 其余 tab 用 CenterAlignedTopAppBar，自带 windowInsets 处理状态栏遮挡。
-                topBar = {
-                    if (current != Screen.Discover) {
-                        CenterAlignedTopAppBar(
-                            title = { Text(title) },
-                            colors = TopAppBarDefaults.topAppBarColors(
-                                containerColor = MaterialTheme.colorScheme.background,
-                            ),
-                        )
-                    }
-                },
+                // 顶部 inset 不再由 Scaffold 统一给：首页 Hero 要顶到状态栏下，
+                // 各页面自己 statusBarsPadding()，这里清零避免双倍留白。
+                contentWindowInsets = WindowInsets(0, 0, 0, 0),
                 bottomBar = { BottomTabs(current, goTab) },
+                containerColor = Ink.Base,
             ) { padding ->
                 Box(
                     modifier = Modifier
@@ -132,19 +123,29 @@ fun StarpickNav(container: AppContainer) {
                         Screen.Discover -> DiscoverScreen(
                             container = container,
                             onPick = { title -> stack.add(Screen.Resolving(title)) },
+                            onResume = { item, record ->
+                                stack.add(
+                                    Screen.Player(item, record.groupIndex, record.episodeIndex),
+                                )
+                            },
+                            onOpenSearch = { goTab(Screen.Search) },
+                            onOpenSettings = { goTab(Screen.Settings) },
                         )
 
                         Screen.Home -> HomeScreen(
                             container = container,
                             onOpen = { stack.add(Screen.Detail(it)) },
                             onResume = { item, record ->
-                                stack.add(Screen.Player(item, record.groupIndex, record.episodeIndex))
+                                stack.add(
+                                    Screen.Player(item, record.groupIndex, record.episodeIndex),
+                                )
                             },
                         )
 
                         Screen.Search -> SearchScreen(
                             container = container,
                             onOpen = { stack.add(Screen.Detail(it)) },
+                            onOpenSettings = { goTab(Screen.Settings) },
                         )
 
                         Screen.Settings -> SettingsScreen(container)
@@ -157,19 +158,30 @@ fun StarpickNav(container: AppContainer) {
 
 @Composable
 private fun BottomTabs(current: Screen, goTab: (Screen) -> Unit) {
-    NavigationBar {
+    NavigationBar(
+        containerColor = Color(0xF20A0E14),
+        contentColor = Ink.Text3,
+        tonalElevation = 0.dp,
+    ) {
         tabs.forEach { tab ->
             val selected = current == tab.screen
             NavigationBarItem(
                 selected = selected,
-                onClick = { goTab(tab.screen) },
+                onClick = { if (!selected) goTab(tab.screen) },
                 icon = {
                     Icon(
-                        imageVector = tab.icon,
+                        imageVector = if (selected) tab.iconSelected else tab.icon,
                         contentDescription = tab.label,
                     )
                 },
                 label = { Text(tab.label) },
+                colors = NavigationBarItemDefaults.colors(
+                    selectedIconColor = Accent.Gold,
+                    selectedTextColor = Ink.Text1,
+                    unselectedIconColor = Ink.Text3,
+                    unselectedTextColor = Ink.Text3,
+                    indicatorColor = Color.Transparent,
+                ),
             )
         }
     }
