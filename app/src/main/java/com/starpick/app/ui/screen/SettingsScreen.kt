@@ -163,11 +163,19 @@ fun SettingsScreen(container: AppContainer) {
                     first = false,
                     showChevron = false,
                     trailing = {
-                        Text(
-                            text = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = Ink.Text3,
-                        )
+                        Column(horizontalAlignment = Alignment.End) {
+                            Text(
+                                text = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = Ink.Text3,
+                            )
+                            // 打包时间：判断「手上这个包是不是最新」的唯一可靠依据。
+                            Text(
+                                text = "打包于 ${BuildConfig.BUILD_TIME}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Ink.Text3,
+                            )
+                        }
                     },
                 )
                 RowItem(
