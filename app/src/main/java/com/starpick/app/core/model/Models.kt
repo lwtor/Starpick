@@ -35,8 +35,16 @@ data class VodItem(
     val contentKey: String get() = contentKeyOf(title)
 }
 
-/** 观看历史的归并键。用片名（忽略大小写与首尾空白），不含源与线路。 */
-fun contentKeyOf(title: String): String = title.trim().lowercase()
+/**
+ * 片名归一化：观看历史与搜索结果分组共用这一套规则，避免同一部片在不同入口算出两种键。
+ *
+ * 不同采集源对同一部片的写法经常差一个空格或半/全角标点（「生活大爆炸 第一季」
+ * 与「生活大爆炸第一季」「生活大爆炸（第一季）」），这里把空白（含全角空格、
+ * 不换行空格、宽空白）与常见分隔标点全部丢掉，只留下片名本体。
+ */
+private val TITLE_NOISE = Regex("[\\s\\p{Z}\\u200B-\\u200D\\uFEFF:：·・\\-—_（）()【】\\[\\]]")
+
+fun contentKeyOf(title: String): String = title.lowercase().replace(TITLE_NOISE, "")
 
 data class Episode(val name: String, val url: String)
 

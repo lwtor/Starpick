@@ -106,7 +106,9 @@ class StarpickStore(context: Context) : SourceRepository, LibraryRepository {
 
     override suspend fun saveProgress(record: WatchProgress) = mutate { snapshot ->
         snapshot.copy(
-            progress = snapshot.progress.filterNot { it.key == record.key } + record,
+            // 最新在前：UI 的「继续观看」直接取前面几条，不排序会拿到最旧的记录。
+            progress = (snapshot.progress.filterNot { it.key == record.key } + record)
+                .sortedByDescending { it.updatedAt },
         )
     }
 
@@ -184,8 +186,13 @@ class StarpickStore(context: Context) : SourceRepository, LibraryRepository {
             .filter { it.title.isNotBlank() }
             .map { it.copy(key = contentKeyOf(it.title)) }
             .groupBy { it.key }
-            .values.mapNotNull { group -> group.maxByOrNull { it.updatedAt } },
-        recent = array("recent").mapNotNull { (it as? JsonObject)?.toVodItem() },
+            .values.mapNotNull { group -> group.maxByOrNull { it.updatedAt } }
+            .sortedByDescending { it.updatedAt },
+        // recent 同样可能被不同源的片名写法拆成多条，按内容 key 去重并保留靠前的（最新）。
+        recent = array("recent")
+            .mapNotNull { (it as? JsonObject)?.toVodItem() }
+            .distinctBy { it.contentKey }
+            .take(RECENT_LIMIT),
         searchHistory = array("searchHistory")
             .mapNotNull { (it as? JsonPrimitive)?.content?.takeIf(String::isNotBlank) }
             .take(SEARCH_HISTORY_LIMIT),

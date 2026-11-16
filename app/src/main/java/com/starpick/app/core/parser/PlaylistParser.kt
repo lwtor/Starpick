@@ -2,6 +2,7 @@ package com.starpick.app.core.parser
 
 import com.starpick.app.core.model.Episode
 import com.starpick.app.core.model.PlayGroup
+import com.starpick.app.core.model.contentKeyOf
 
 /**
  * 苹果 CMS V10 的播放串解析：
@@ -53,6 +54,6 @@ object PlaylistParser {
     }
 
     /** 聚合搜索时的标题归一：去掉空白、标点与常见分隔符。 */
-    fun normalizeTitle(title: String): String =
-        title.lowercase().replace(Regex("[\\s:：·・\\-—_（）()【】\\[\\]]"), "").trim()
+    /** 搜索结果的分组键，与观看历史的归并键保持一致。 */
+    fun normalizeTitle(title: String): String = contentKeyOf(title)
 }
