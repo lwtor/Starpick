@@ -32,11 +32,15 @@ import com.starpick.app.core.model.SearchGroup
 import com.starpick.app.core.model.VodItem
 import com.starpick.app.ui.screen.DetailScreen
 import com.starpick.app.ui.screen.DiscoverScreen
+import com.starpick.app.ui.screen.DiscoverSearchScreen
 import com.starpick.app.ui.screen.DiscoverUiState
+import com.starpick.app.ui.screen.DoubanSearchUiState
 import com.starpick.app.ui.screen.HomeScreen
+import com.starpick.app.ui.screen.HomeUiState
 import com.starpick.app.ui.screen.PlayerScreen
 import com.starpick.app.ui.screen.ResolvingScreen
 import com.starpick.app.ui.screen.SearchScreen
+import com.starpick.app.ui.screen.SearchUiState
 import com.starpick.app.ui.screen.SettingsScreen
 import com.starpick.app.ui.theme.Accent
 import com.starpick.app.ui.theme.Ink
@@ -50,6 +54,9 @@ sealed interface Screen {
     data object Home : Screen
     data object Search : Screen
     data object Settings : Screen
+
+    /** 独立搜索页：只查豆瓣条目，与底部「搜索」（查采集源）分工不同。 */
+    data object DiscoverSearch : Screen
     data class Detail(val group: SearchGroup) : Screen
     data class Resolving(val title: String) : Screen
     data class Player(val item: VodItem, val groupIndex: Int, val episodeIndex: Int) : Screen
@@ -72,8 +79,12 @@ private val tabs = listOf(
 @Composable
 fun StarpickNav(container: AppContainer) {
     val stack = remember { mutableStateListOf<Screen>(Screen.Discover) }
-    // 首页数据挂在导航层：切走再切回时 Composable 会重建，但榜单不会重新拉一遍。
+    // 各 tab 的数据与滚动位置都挂在导航层：Composable 会因为切页被销毁重建，
+    // 但这两样东西不能让用户丢掉（重新拉榜单、搜索结果消失、列表被顶回顶部）。
     val discoverState = remember { DiscoverUiState() }
+    val homeState = remember { HomeUiState() }
+    val searchState = remember { SearchUiState() }
+    val doubanSearchState = remember { DoubanSearchUiState() }
     val current = stack.last()
     val pop: () -> Unit = { if (stack.size > 1) stack.removeLastOrNull() }
     val goTab: (Screen) -> Unit = { tab ->
@@ -112,6 +123,14 @@ fun StarpickNav(container: AppContainer) {
             onBack = pop,
         )
 
+        is Screen.DiscoverSearch -> DiscoverSearchScreen(
+            container = container,
+            state = doubanSearchState,
+            // 与首页海报同一条路径：拿豆瓣片名去用户的源里解析，命中后直接换成详情页。
+            onPick = { title -> stack.add(Screen.Resolving(title)) },
+            onBack = pop,
+        )
+
         else -> {
             Scaffold(
                 // 顶部 inset 不再由 Scaffold 统一给：首页 Hero 要顶到状态栏下，
@@ -135,12 +154,14 @@ fun StarpickNav(container: AppContainer) {
                                     Screen.Player(item, record.groupIndex, record.episodeIndex),
                                 )
                             },
-                            onOpenSearch = { goTab(Screen.Search) },
+                            // 顶栏搜索图标 → 独立的豆瓣搜索页；底部「搜索」tab 保持搜采集源。
+                            onOpenSearch = { stack.add(Screen.DiscoverSearch) },
                             onOpenSettings = { goTab(Screen.Settings) },
                         )
 
                         Screen.Home -> HomeScreen(
                             container = container,
+                            state = homeState,
                             onOpen = { stack.add(Screen.Detail(it)) },
                             onResume = { item, record ->
                                 stack.add(
@@ -152,6 +173,7 @@ fun StarpickNav(container: AppContainer) {
 
                         Screen.Search -> SearchScreen(
                             container = container,
+                            state = searchState,
                             onOpen = { stack.add(Screen.Detail(it)) },
                             onOpenSettings = { goTab(Screen.Settings) },
                         )

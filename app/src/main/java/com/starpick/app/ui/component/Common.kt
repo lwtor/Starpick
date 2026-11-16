@@ -18,8 +18,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -32,10 +37,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -157,15 +164,16 @@ fun PosterCard(
     subtitle: String? = null,
     onClick: () -> Unit,
 ) {
+    // 圆角只裁封面，不能裁整个 Column：整列裁圆角会把最下面一行文字的
+    // 左下/右下角削掉（表现为「底部文字被剪裁」）。
     Column(
-        modifier = modifier
-            .clip(RoundedCornerShape(12.dp))
-            .clickable(onClick = onClick),
+        modifier = modifier.clickable(onClick = onClick),
     ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(2f / 3f),
+                .aspectRatio(2f / 3f)
+                .clip(RoundedCornerShape(12.dp)),
         ) {
             VodCover(
                 title = title,
@@ -222,6 +230,8 @@ fun PosterCard(
             style = MaterialTheme.typography.bodySmall,
             fontWeight = FontWeight.SemiBold,
             color = Ink.Text1,
+            // 固定两行高：同一行里有的片名一行、有的两行，会让网格底部参差不齐。
+            minLines = 2,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )
@@ -436,8 +446,71 @@ fun SegmentedTabs(
     }
 }
 
-/** 线路 / 筛选胶囊。 */
+/**
+ * 搜索输入框：圆角深底 + 前置图标 + 有内容时出现清空键。
+ * 两个搜索页（采集源搜索 / 豆瓣搜索）共用，避免两套视觉。
+ */
 @Composable
+fun SearchBar(
+    query: String,
+    placeholder: String,
+    onQueryChange: (String) -> Unit,
+    onSearch: () -> Unit,
+    onClear: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(46.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(Ink.Card)
+            .border(1.dp, Ink.Line, RoundedCornerShape(14.dp))
+            .padding(horizontal = 13.dp),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = Icons.Filled.Search,
+                contentDescription = null,
+                tint = Ink.Text3,
+                modifier = Modifier.size(17.dp),
+            )
+            Spacer(Modifier.width(9.dp))
+            Box(modifier = Modifier.weight(1f)) {
+                if (query.isEmpty()) {
+                    Text(
+                        text = placeholder,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = Ink.Text3,
+                    )
+                }
+                BasicTextField(
+                    value = query,
+                    onValueChange = onQueryChange,
+                    singleLine = true,
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = Ink.Text1),
+                    cursorBrush = SolidColor(Accent.Brand),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = { onSearch() }),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            if (query.isNotEmpty()) {
+                Icon(
+                    imageVector = Icons.Filled.Close,
+                    contentDescription = "清空",
+                    tint = Ink.Text3,
+                    modifier = Modifier
+                        .size(17.dp)
+                        .clickable(onClick = onClear),
+                )
+            }
+        }
+    }
+}
+
+/** 线路 / 筛选胶囊。 */@Composable
 fun LineChip(
     text: String,
     selected: Boolean,

@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -19,7 +20,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,6 +38,12 @@ import com.starpick.app.ui.component.UpdateCard
 import com.starpick.app.ui.component.formatPosition
 import com.starpick.app.ui.theme.Ink
 
+/** 片匣 UI 状态：分段选择 + 滚动位置，挂在导航层，进详情回来不重置。 */
+class HomeUiState {
+    var tabIndex by mutableIntStateOf(0)
+    val listState = LazyListState()
+}
+
 /**
  * 片匣：继续观看（列表）+ 收藏（海报网格）。
  *
@@ -47,6 +53,7 @@ import com.starpick.app.ui.theme.Ink
 @Composable
 fun HomeScreen(
     container: AppContainer,
+    state: HomeUiState,
     onOpen: (SearchGroup) -> Unit,
     onResume: (VodItem, WatchProgress) -> Unit,
     onOpenSettings: () -> Unit,
@@ -55,9 +62,10 @@ fun HomeScreen(
     val progress by container.store.progress.collectAsState()
     val recent by container.store.recent.collectAsState()
 
-    var tabIndex by remember { mutableIntStateOf(0) }
+    val tabIndex = state.tabIndex
 
     LazyColumn(
+        state = state.listState,
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding(),
@@ -92,7 +100,7 @@ fun HomeScreen(
                 SegmentedTabs(
                     options = listOf("继续观看", "收藏"),
                     selectedIndex = tabIndex,
-                    onSelect = { tabIndex = it },
+                    onSelect = { state.tabIndex = it },
                 )
             }
         }

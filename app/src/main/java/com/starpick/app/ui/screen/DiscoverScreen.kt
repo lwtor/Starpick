@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
@@ -24,7 +25,6 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.VideoLibrary
@@ -93,6 +93,9 @@ class DiscoverUiState {
     var refreshing by mutableStateOf(false)
     var error by mutableStateOf<String?>(null)
     var loadedTab by mutableIntStateOf(-1)
+
+    /** 滚动位置也挂在导航层：进详情再回来不会跳回顶部。 */
+    val listState = LazyListState()
 }
 
 /**
@@ -180,6 +183,7 @@ fun DiscoverScreen(
             modifier = Modifier.fillMaxSize(),
         ) {
             LazyColumn(
+                state = state.listState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = 8.dp),
             ) {
@@ -274,20 +278,17 @@ fun DiscoverScreen(
         }
 
         // 品牌行固定在顶部（压在 Hero 上），随内容滚动始终保持可达。
+        // 刷新只保留下拉一种入口，顶栏不再放重复按钮。
         TopBar(
-            loading = loading,
-            onRefresh = { load(true) },
             onSearch = onOpenSearch,
             modifier = Modifier.align(Alignment.TopStart),
         )
     }
 }
 
-/** 顶部品牌行：星匣 + 豆瓣实时热门 + 刷新 / 搜索。 */
+/** 顶部品牌行：星匣 + 豆瓣实时热门 + 搜索。 */
 @Composable
 private fun TopBar(
-    loading: Boolean,
-    onRefresh: () -> Unit,
     onSearch: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -325,8 +326,7 @@ private fun TopBar(
             color = Color(0xB3FFFFFF),
         )
         Spacer(Modifier.weight(1f))
-        RoundIcon(Icons.Filled.Refresh, "刷新榜单", enabled = !loading, onClick = onRefresh)
-        RoundIcon(Icons.Filled.Search, "搜索", enabled = true, onClick = onSearch)
+        RoundIcon(Icons.Filled.Search, "搜索豆瓣", enabled = true, onClick = onSearch)
     }
 }
 
