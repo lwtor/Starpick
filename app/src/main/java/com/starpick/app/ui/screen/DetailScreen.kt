@@ -13,9 +13,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -44,6 +41,7 @@ import com.starpick.app.core.model.VodItem
 import com.starpick.app.core.model.WatchProgress
 import com.starpick.app.core.parser.PlaylistParser
 import com.starpick.app.ui.component.EmptyHint
+import com.starpick.app.ui.component.FlowPosterGrid
 import com.starpick.app.ui.component.SectionTitle
 import com.starpick.app.ui.component.VodCover
 import kotlinx.coroutines.Dispatchers
@@ -268,20 +266,19 @@ fun DetailScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Spacer(Modifier.height(8.dp))
-                        LazyVerticalGrid(
-                            columns = GridCells.Adaptive(minSize = 64.dp),
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                            userScrollEnabled = false,
-                        ) {
-                            items(episodes.size) { index ->
-                                OutlinedButton(
-                                    onClick = { onPlay(resolved, lineIndex, index) },
-                                    contentPadding = PaddingValues(4.dp),
-                                ) {
-                                    Text("${index + 1}")
-                                }
+                        // 选集按钮：手写分行（每行 5 个），不能嵌套 LazyVerticalGrid（与 LazyColumn 冲突崩溃）。
+                        FlowPosterGrid(
+                            columns = 5,
+                            itemCount = episodes.size,
+                            horizontalSpacing = 8.dp,
+                            verticalSpacing = 8.dp,
+                        ) { index, itemModifier ->
+                            OutlinedButton(
+                                onClick = { onPlay(resolved, lineIndex, index) },
+                                contentPadding = PaddingValues(4.dp),
+                                modifier = itemModifier,
+                            ) {
+                                Text("${index + 1}")
                             }
                         }
                     }

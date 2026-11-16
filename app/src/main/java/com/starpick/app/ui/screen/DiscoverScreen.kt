@@ -18,9 +18,6 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -53,6 +50,7 @@ import coil3.request.crossfade
 import com.starpick.app.AppContainer
 import com.starpick.app.core.model.DoubanSubject
 import com.starpick.app.ui.component.EmptyHint
+import com.starpick.app.ui.component.FlowPosterGrid
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -150,7 +148,7 @@ fun DiscoverScreen(
                 }
             }
 
-            // 海报网格
+            // 海报网格：手写分行（不能用 LazyVerticalGrid，会与 LazyColumn 纵向滚动冲突崩溃）。
             item {
                 if (loading && subjects.isNotEmpty()) {
                     Box(
@@ -160,17 +158,16 @@ fun DiscoverScreen(
                         CircularProgressIndicator()
                     }
                 } else {
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(3),
-                        modifier = Modifier.fillMaxWidth(),
-                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(16.dp),
-                        userScrollEnabled = false,
-                    ) {
-                        items(subjects, key = { it.id }) { subject ->
-                            PosterCard(subject = subject, onClick = { onPick(subject.title) })
-                        }
+                    FlowPosterGrid(
+                        columns = 3,
+                        itemCount = subjects.size,
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                    ) { index, itemModifier ->
+                        PosterCard(
+                            subject = subjects[index],
+                            modifier = itemModifier,
+                            onClick = { onPick(subjects[index].title) },
+                        )
                     }
                 }
             }
@@ -368,10 +365,10 @@ private fun HeroCard(subject: DoubanSubject, modifier: Modifier = Modifier, onCl
 
 /** 海报卡片：封面 + 评分角标 + 片名 + 剧集信息。 */
 @Composable
-private fun PosterCard(subject: DoubanSubject, onClick: () -> Unit) {
+private fun PosterCard(subject: DoubanSubject, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val shape = RoundedCornerShape(10.dp)
     Column(
-        modifier = Modifier
+        modifier = modifier
             .clip(shape)
             .clickable(onClick = onClick),
     ) {

@@ -53,9 +53,11 @@ import com.starpick.app.AppContainer
 import com.starpick.app.core.model.VodItem
 import com.starpick.app.core.model.WatchProgress
 import com.starpick.app.core.parser.PlaylistParser
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 播放页：ExoPlayer + 顶部返回栏 + 底部选集/倍速抽屉。
@@ -119,19 +121,28 @@ fun PlayerScreen(
     var lastDuration by remember { mutableStateOf(0L) }
 
     // 进入恢复进度 + 每 5 秒刷新一次快照并落盘。
+    // ExoPlayer 必须在主线程访问，这里显式用 Main.immediate 兜底，
+    // 避免协程被切到 IO 线程后读 player.currentPosition 触发 "wrong thread" 崩溃。
     LaunchedEffect(player, item.key) {
-        val saved = container.store.progressFor(item.key)
-        if (saved != null &&
-            saved.groupIndex == currentGroup &&
-            saved.episodeIndex == safeEpisode &&
-            saved.positionMs > 0
-        ) {
-            player.seekTo(saved.positionMs)
+        withContext(Dispatchers.Main.immediate) {
+            val saved = container.store.progressFor(item.key)
+            if (saved != null &&
+                saved.groupIndex == currentGroup &&
+                saved.episodeIndex == safeEpisode &&
+                saved.positionMs > 0
+            ) {
+                player.seekTo(saved.positionMs)
+            }
         }
         while (isActive) {
             delay(5_000)
-            lastPosition = player.currentPosition.coerceAtLeast(0L)
-            lastDuration = player.duration.takeIf { it > 0 } ?: 0L
+            val (pos, dur) = withContext(Dispatchers.Main.immediate) {
+                player.currentPosition.coerceAtLeast(0L) to
+                    (player.duration.takeIf { it > 0 } ?: 0L)
+            }
+            lastPosition = pos
+            lastDuration = dur
+            // saveProgress 内部已切 IO 写文件，这里无需再切。
             container.store.saveProgress(
                 WatchProgress(
                     key = item.key,
@@ -163,7 +174,10 @@ fun PlayerScreen(
                 updatedAt = System.currentTimeMillis(),
             )
             container.appScope.launch { container.store.saveProgress(record) }
-            runCatching { player.release() }
+            // release 也要求主线程，这里显式切回主线程并 try-catch 兜底。
+            container.appScope.launch(Dispatchers.Main.immediate) {
+                runCatching { player.release() }
+            }
         }
     }
 

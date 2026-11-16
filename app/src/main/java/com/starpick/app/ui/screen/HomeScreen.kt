@@ -14,9 +14,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
@@ -33,6 +30,7 @@ import com.starpick.app.AppContainer
 import com.starpick.app.core.model.SearchGroup
 import com.starpick.app.core.model.VodItem
 import com.starpick.app.core.model.WatchProgress
+import com.starpick.app.ui.component.FlowPosterGrid
 import com.starpick.app.ui.component.SectionTitle
 import com.starpick.app.ui.component.UpdateCard
 import com.starpick.app.ui.component.VodCover
@@ -144,40 +142,35 @@ private fun ContinueWatchingRow(
     }
 }
 
-/** 影视海报网格：每行 3 个，封面按 2:3 比例。 */
+/** 影视海报网格：每行 3 个，封面按 2:3 比例。手写分行，避免嵌套 LazyVerticalGrid 崩溃。 */
 @Composable
 private fun PosterGrid(
     items: List<VodItem>,
     onClick: (VodItem) -> Unit,
 ) {
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(3),
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-        userScrollEnabled = false,
-    ) {
-        items(items, key = { it.key }) { item ->
-            Column(
+    FlowPosterGrid(
+        columns = 3,
+        itemCount = items.size,
+    ) { index, itemModifier ->
+        Column(
+            modifier = itemModifier
+                .clip(RoundedCornerShape(10.dp))
+                .clickable { onClick(items[index]) },
+        ) {
+            VodCover(
+                title = items[index].title,
+                cover = items[index].cover,
                 modifier = Modifier
-                    .clip(RoundedCornerShape(10.dp))
-                    .clickable { onClick(item) },
-            ) {
-                VodCover(
-                    title = item.title,
-                    cover = item.cover,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(2f / 3f),
-                )
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    text = item.title,
-                    style = MaterialTheme.typography.bodySmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
+                    .fillMaxWidth()
+                    .aspectRatio(2f / 3f),
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = items[index].title,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

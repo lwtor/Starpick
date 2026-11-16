@@ -1,10 +1,13 @@
 package com.starpick.app.ui.component
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
@@ -74,6 +77,50 @@ fun VodCover(title: String, cover: String, modifier: Modifier = Modifier) {
                 .clip(shape)
                 .background(Color(0xFFE3EAF3)),
         )
+    }
+}
+
+/**
+ * 手写分行网格：把一维列表按固定列数切成若干 Row，供 LazyColumn 的 item 内部使用。
+ *
+ * 为什么不用 LazyVerticalGrid：LazyVerticalGrid 是惰性滚动容器，不能嵌套在另一个
+ * 纵向滚动容器（LazyColumn）里——会触发 "Vertically scrollable component was measured
+ * with an infinity maximum height constraints" 崩溃。这里用普通 Row/Column 平铺，
+ * 数据量不大（榜单/片匣一般几十项），性能足够。
+ */
+@Composable
+fun FlowPosterGrid(
+    columns: Int,
+    itemCount: Int,
+    modifier: Modifier = Modifier,
+    horizontalSpacing: androidx.compose.ui.unit.Dp = 12.dp,
+    verticalSpacing: androidx.compose.ui.unit.Dp = 16.dp,
+    itemContent: @Composable (index: Int, modifier: Modifier) -> Unit,
+) {
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(verticalSpacing),
+    ) {
+        var index = 0
+        while (index < itemCount) {
+            val rowItems = (index until (index + columns).coerceAtMost(itemCount)).toList()
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(horizontalSpacing),
+            ) {
+                rowItems.forEach { i ->
+                    itemContent(
+                        i,
+                        Modifier.weight(1f),
+                    )
+                }
+                // 末行补位：用占位 Box 保证不足一行的项左对齐。
+                repeat(columns - rowItems.size) {
+                    Spacer(Modifier.weight(1f))
+                }
+            }
+            index += columns
+        }
     }
 }
 
