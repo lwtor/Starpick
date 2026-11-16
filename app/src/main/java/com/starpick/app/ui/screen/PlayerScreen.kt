@@ -18,6 +18,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.horizontalScroll
@@ -58,6 +59,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -232,6 +234,12 @@ fun PlayerSurface(
     var durationMs by remember { mutableLongStateOf(0L) }
     // 已经预载（含磁盘缓存命中）到的位置，进度条用它画出「已缓存」那一段。
     var bufferedMs by remember(player) { mutableLongStateOf(0L) }
+    // 横向滑动快进 / 快退：拖动中只更新预览，松手才真正 seek，避免一路拖动触发几十次跳转。
+    var swipeTargetMs by remember { mutableStateOf<Long?>(null) }
+    var swipeDeltaMs by remember { mutableLongStateOf(0L) }
+    // 提示的延迟消失用批次号控制：新的一次滑动能作废上一次的定时器。
+    var swipeHideToken by remember { mutableIntStateOf(0) }
+    val gestureScope = rememberCoroutineScope()
     var lastPosition by remember { mutableStateOf(0L) }
     var lastDuration by remember { mutableStateOf(0L) }
 
@@ -451,7 +459,23 @@ fun PlayerSurface(
             modifier = Modifier.fillMaxSize(),
         )
 
+        // 松手才 seek，并让提示多留 0.7 秒再消失（立刻消失会像闪了一下）。
+        val commitSwipeSeek: () -> Unit = {
+            val target = swipeTargetMs
+            if (target != null) {
+                player.seekTo(target)
+                positionMs = target
+                val token = ++swipeHideToken
+                gestureScope.launch {
+                    delay(700)
+                    if (swipeHideToken == token) swipeTargetMs = null
+                }
+            }
+        }
+
         // 整块区域的点击：单击切换控制条显隐，双击播放 / 暂停。
+        // 另外接横向拖动做快进 / 快退：向右前进，向左后退，整屏宽度对应 [SWIPE_SEEK_SPAN_MS]。
+        // 纵向手势不处理（detectHorizontalDragGestures 只认横向），留不给音量 / 亮度用。
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -466,8 +490,41 @@ fun PlayerSurface(
                         },
                         onDoubleTap = { togglePlay() },
                     )
+                }
+                .pointerInput(player) {
+                    var anchorMs = 0L
+                    var travelled = 0f
+                    detectHorizontalDragGestures(
+                        onDragStart = {
+                            swipeHideToken++
+                            anchorMs = player.currentPosition.coerceAtLeast(0L)
+                            travelled = 0f
+                        },
+                        onHorizontalDrag = { change, amount ->
+                            change.consume()
+                            travelled += amount
+                            val total = player.duration
+                            if (total <= 0) return@detectHorizontalDragGestures
+                            val delta = (travelled / size.width * SWIPE_SEEK_SPAN_MS).toLong()
+                            val target = (anchorMs + delta).coerceIn(0L, total)
+                            swipeDeltaMs = target - anchorMs
+                            swipeTargetMs = target
+                        },
+                        onDragEnd = { commitSwipeSeek() },
+                        onDragCancel = { commitSwipeSeek() },
+                    )
                 },
         )
+
+        // 滑动反馈：拖的时候实时显示将跳到哪，松手后自动淡出。
+        swipeTargetMs?.takeIf { durationMs > 0 }?.let { target ->
+            SwipeSeekHint(
+                deltaMs = swipeDeltaMs,
+                targetMs = target,
+                durationMs = durationMs,
+                modifier = Modifier.align(Alignment.Center),
+            )
+        }
 
         // 失败时给出可操作的出口，而不是继续转圈。
         val errorText = failure
@@ -969,6 +1026,44 @@ private fun PlayerSeekBar(
     }
 }
 
+/**
+ * 滑动快进 / 快退时的浮层：上面是「±多久」，下面是「跳到哪个时间 / 总时长」。
+ *
+ * 做成半透明黑底小卡片，压在画面中央；不挡住控制条，也不跟随手指移动
+ * （跟手的小图标在视频上很难看清，静止的读数更有用）。
+ */
+@Composable
+private fun SwipeSeekHint(
+    deltaMs: Long,
+    targetMs: Long,
+    durationMs: Long,
+    modifier: Modifier = Modifier,
+) {
+    val ahead = deltaMs >= 0
+    val magnitude = if (ahead) deltaMs else -deltaMs
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0xB3000000))
+            .border(1.dp, Color(0x26FFFFFF), RoundedCornerShape(12.dp))
+            .padding(horizontal = 18.dp, vertical = 10.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            text = (if (ahead) "+" else "−") + formatPosition(magnitude),
+            style = MaterialTheme.typography.titleMedium,
+            color = Accent.Gold,
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(
+            text = "${formatPosition(targetMs)} / ${formatPosition(durationMs)}",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color(0xB3FFFFFF),
+        )
+    }
+}
+
 @Composable
 private fun TextAction(text: String, onClick: () -> Unit) {
     Text(
@@ -1060,6 +1155,9 @@ private fun Throwable.causedByUnknownHost(): Boolean {
     }
     return false
 }
+
+/** 横向滑动整屏宽度对应的跳转时长。2 分钟既是常见剧集时长的 5% 左右，也还够细。 */
+private const val SWIPE_SEEK_SPAN_MS = 120_000f
 
 private fun formatSpeed(speed: Float): String =
     if (speed == speed.toInt().toFloat()) speed.toInt().toString() else speed.toString()
