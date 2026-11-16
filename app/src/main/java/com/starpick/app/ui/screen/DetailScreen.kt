@@ -1,5 +1,6 @@
 package com.starpick.app.ui.screen
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -52,6 +53,7 @@ import coil3.request.crossfade
 import com.starpick.app.AppContainer
 import com.starpick.app.core.model.SearchGroup
 import com.starpick.app.core.model.VodItem
+import com.starpick.app.core.model.contentKeyOf
 import com.starpick.app.core.model.WatchProgress
 import com.starpick.app.core.parser.PlaylistParser
 import com.starpick.app.ui.component.EmptyState
@@ -77,8 +79,8 @@ import kotlinx.coroutines.withContext
 fun DetailScreen(
     container: AppContainer,
     group: SearchGroup,
+    initialPlay: WatchProgress? = null,
     onBack: () -> Unit,
-    onPlay: (VodItem, Int, Int) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val sources by container.store.sources.collectAsState()
@@ -103,9 +105,29 @@ fun DetailScreen(
     var resumeRecord by remember(group) { mutableStateOf<WatchProgress?>(null) }
     var lineIndex by remember(group) { mutableStateOf(0) }
     var expanded by remember(group) { mutableStateOf(false) }
+    // 播放不再跳转到独立页面：点播放只是在本页把头部切换成播放器。
+    var playing by remember(group) { mutableStateOf<PlayTarget?>(null) }
+
+    // 竖屏播放时返回先收起播放器；横屏时由播放器自己的 BackHandler 先退全屏。
+    BackHandler(enabled = playing != null) { playing = null }
 
     LaunchedEffect(group) {
-        container.store.rememberItem(group.items.first())
+        val record = initialPlay ?: container.store.progressFor(contentKeyOf(group.title))
+        // 按最后一次播放记录自动切回当时的源，而不是永远用搜索结果的第一个。
+        val matched = if (record != null && record.sourceId.isNotBlank()) {
+            group.items.firstOrNull { it.sourceId == record.sourceId && it.vodId == record.vodId }
+        } else null
+        if (matched != null) selected = matched
+        container.store.rememberItem(matched ?: group.items.first())
+        if (initialPlay != null) {
+            val target = matched ?: group.items.first()
+            val count = PlaylistParser.parse(target.playFrom, target.playUrl).size
+            playing = PlayTarget(
+                target,
+                initialPlay.groupIndex.coerceIn(0, (count - 1).coerceAtLeast(0)),
+                initialPlay.episodeIndex,
+            )
+        }
     }
 
     // 搜索结果里有些源不给播放串，换源或取详情时补一次。
@@ -123,9 +145,15 @@ fun DetailScreen(
                 }
             }
             resolved = base
-            lineIndex = 0
+            val record = container.store.progressFor(base.contentKey)
+            resumeRecord = record
+            // 同一条记录才恢复线路；源不同时线路编号不通用。
+            val wanted = if (record != null && record.sourceId == base.sourceId && record.vodId == base.vodId) {
+                record.groupIndex
+            } else 0
+            val count = PlaylistParser.parse(base.playFrom, base.playUrl).size
+            lineIndex = wanted.coerceIn(0, (count - 1).coerceAtLeast(0))
             favorite = container.store.isFavorite(base.key)
-            resumeRecord = container.store.progressFor(base.contentKey)
         }
     }
 
@@ -133,6 +161,19 @@ fun DetailScreen(
         PlaylistParser.parse(resolved.playFrom, resolved.playUrl)
     }
     val episodes = playGroups.getOrNull(lineIndex)?.episodes.orEmpty()
+
+    val target = playing
+    if (target != null) {
+        PlayerScreen(
+            container = container,
+            item = target.item,
+            groupIndex = target.groupIndex,
+            episodeIndex = target.episodeIndex,
+            // 播放器的返回只收起播放器，回到详情，不再新开/弹出一个页面。
+            onBack = { playing = null },
+        )
+        return
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -171,9 +212,9 @@ fun DetailScreen(
                     enabled = record != null || episodes.isNotEmpty(),
                     onClick = {
                         if (record != null) {
-                            onPlay(resolved, record.groupIndex, record.episodeIndex)
+                            playing = PlayTarget(resolved, record.groupIndex, record.episodeIndex)
                         } else if (episodes.isNotEmpty()) {
-                            onPlay(resolved, lineIndex, 0)
+                            playing = PlayTarget(resolved, lineIndex, 0)
                         }
                     },
                 )
@@ -290,7 +331,7 @@ fun DetailScreen(
                         modifier = itemModifier,
                         selected = currentEp == index,
                         seen = currentEp > index,
-                        onClick = { onPlay(resolved, lineIndex, index) },
+                        onClick = { playing = PlayTarget(resolved, lineIndex, index) },
                     )
                 }
             }
@@ -451,3 +492,10 @@ private fun BackRow(title: String, onBack: () -> Unit) {
         )
     }
 }
+
+/** 当前正在播放的目标：同一页面内切换详情/播放器时不需要动导航栈。 */
+private data class PlayTarget(
+    val item: VodItem,
+    val groupIndex: Int,
+    val episodeIndex: Int,
+)

@@ -38,6 +38,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusManager
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -111,6 +114,8 @@ fun SearchScreen(
     val history by container.store.searchHistory.collectAsState()
     val enabledSources = remember(sources) { sources.filter { it.enabled } }
     val scope = rememberCoroutineScope()
+    val focusManager: FocusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
 
     // 有搜索内容时，返回键只清空搜索，不退出页面；再按一次才轮到导航层处理退出。
     BackHandler(enabled = state.hasSearch) { state.clearSearch() }
@@ -138,6 +143,8 @@ fun SearchScreen(
     }
 
     val runSearch: (String, Boolean) -> Unit = { raw, isRefresh ->
+        focusManager.clearFocus()
+        keyboard?.hide()
         val keyword = raw.trim()
         if (keyword.isNotEmpty() && enabledSources.isNotEmpty() && !state.loading) {
             state.loading = true

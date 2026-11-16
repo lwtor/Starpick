@@ -219,6 +219,8 @@ fun PlayerScreen(
                         key = item.contentKey,
                         title = item.title,
                         cover = item.cover,
+                        sourceId = item.sourceId,
+                        vodId = item.vodId,
                         groupIndex = currentGroup,
                         episodeIndex = safeEpisode,
                         episodeName = currentName ?: "",
@@ -238,6 +240,8 @@ fun PlayerScreen(
                 key = item.contentKey,
                 title = item.title,
                 cover = item.cover,
+                sourceId = item.sourceId,
+                vodId = item.vodId,
                 groupIndex = currentGroup,
                 episodeIndex = safeEpisode,
                 episodeName = currentName ?: "",
@@ -246,6 +250,8 @@ fun PlayerScreen(
                 updatedAt = System.currentTimeMillis(),
             )
             container.appScope.launch { container.store.saveProgress(record) }
+            // 让「继续观看」拿到的是最后实际播放的源，而不是第一次打开详情时的那个。
+            container.appScope.launch { container.store.rememberItem(item) }
             container.appScope.launch(Dispatchers.Main.immediate) {
                 runCatching { player.release() }
             }

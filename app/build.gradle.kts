@@ -11,8 +11,8 @@ android {
         applicationId = "com.starpick.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 6008
-        versionName = "0.6.8"
+        versionCode = 7000
+        versionName = "0.7.0"
     }
 
     buildTypes {

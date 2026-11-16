@@ -40,6 +40,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusManager
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.starpick.app.AppContainer
@@ -101,6 +104,8 @@ fun DiscoverSearchScreen(
 ) {
     val history by container.store.searchHistory.collectAsState()
     val scope = rememberCoroutineScope()
+    val focusManager: FocusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
 
     // 系统返回键：有搜索内容就先清空，不退出本页。
     BackHandler(enabled = state.hasSearch) { state.clearSearch() }
@@ -110,6 +115,8 @@ fun DiscoverSearchScreen(
     }
 
     val search: (String, Boolean) -> Unit = { raw, isRefresh ->
+        focusManager.clearFocus()
+        keyboard?.hide()
         val keyword = raw.trim()
         if (keyword.isNotEmpty() && !state.loading) {
             state.loading = true

@@ -239,6 +239,8 @@ class StarpickStore(context: Context) : SourceRepository, LibraryRepository {
         put("key", key)
         put("title", title)
         put("cover", cover)
+        put("sourceId", sourceId)
+        put("vodId", vodId)
         put("groupIndex", JsonPrimitive(groupIndex))
         put("episodeIndex", JsonPrimitive(episodeIndex))
         put("episodeName", episodeName)
@@ -251,6 +253,8 @@ class StarpickStore(context: Context) : SourceRepository, LibraryRepository {
         key = str("key"),
         title = str("title"),
         cover = str("cover"),
+        sourceId = str("sourceId"),
+        vodId = str("vodId"),
         groupIndex = int("groupIndex"),
         episodeIndex = int("episodeIndex"),
         episodeName = str("episodeName"),

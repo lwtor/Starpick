@@ -39,6 +39,7 @@ import androidx.compose.ui.unit.dp
 import com.starpick.app.AppContainer
 import com.starpick.app.core.model.SearchGroup
 import com.starpick.app.core.model.VodItem
+import com.starpick.app.core.model.WatchProgress
 import com.starpick.app.ui.screen.DetailScreen
 import com.starpick.app.ui.screen.DiscoverScreen
 import com.starpick.app.ui.screen.DiscoverSearchScreen
@@ -46,7 +47,6 @@ import com.starpick.app.ui.screen.DiscoverUiState
 import com.starpick.app.ui.screen.DoubanSearchUiState
 import com.starpick.app.ui.screen.HomeScreen
 import com.starpick.app.ui.screen.HomeUiState
-import com.starpick.app.ui.screen.PlayerScreen
 import com.starpick.app.ui.screen.ResolvingScreen
 import com.starpick.app.ui.screen.SearchScreen
 import com.starpick.app.ui.screen.SearchUiState
@@ -66,9 +66,8 @@ sealed interface Screen {
 
     /** 独立搜索页：只查豆瓣条目，与底部「搜索」（查采集源）分工不同。 */
     data object DiscoverSearch : Screen
-    data class Detail(val group: SearchGroup) : Screen
+    data class Detail(val group: SearchGroup, val initialPlay: WatchProgress? = null) : Screen
     data class Resolving(val title: String) : Screen
-    data class Player(val item: VodItem, val groupIndex: Int, val episodeIndex: Int) : Screen
 }
 
 private data class TabSpec(
@@ -126,10 +125,8 @@ fun StarpickNav(container: AppContainer) {
         is Screen.Detail -> DetailScreen(
             container = container,
             group = current.group,
+            initialPlay = current.initialPlay,
             onBack = pop,
-            onPlay = { item, groupIndex, episodeIndex ->
-                stack.add(Screen.Player(item, groupIndex, episodeIndex))
-            },
         )
 
         is Screen.Resolving -> ResolvingScreen(
@@ -139,14 +136,6 @@ fun StarpickNav(container: AppContainer) {
             // 之前是 add，导致详情页返回后回落到 Resolving，它又会重新解析并再次推开详情，
             // 表现出来就是「详情页返回不了」。
             onResolved = { group -> stack[stack.lastIndex] = Screen.Detail(group) },
-            onBack = pop,
-        )
-
-        is Screen.Player -> PlayerScreen(
-            container = container,
-            item = current.item,
-            groupIndex = current.groupIndex,
-            episodeIndex = current.episodeIndex,
             onBack = pop,
         )
 
@@ -177,9 +166,7 @@ fun StarpickNav(container: AppContainer) {
                             state = discoverState,
                             onPick = { title -> stack.add(Screen.Resolving(title)) },
                             onResume = { item, record ->
-                                stack.add(
-                                    Screen.Player(item, record.groupIndex, record.episodeIndex),
-                                )
+                                stack.add(Screen.Detail(SearchGroup(item.title, listOf(item)), record))
                             },
                             // 顶栏搜索图标 → 独立的豆瓣搜索页；底部「搜索」tab 保持搜采集源。
                             onOpenSearch = { stack.add(Screen.DiscoverSearch) },
@@ -191,9 +178,7 @@ fun StarpickNav(container: AppContainer) {
                             state = homeState,
                             onOpen = { stack.add(Screen.Detail(it)) },
                             onResume = { item, record ->
-                                stack.add(
-                                    Screen.Player(item, record.groupIndex, record.episodeIndex),
-                                )
+                                stack.add(Screen.Detail(SearchGroup(item.title, listOf(item)), record))
                             },
                             onOpenSettings = { goTab(Screen.Settings) },
                         )

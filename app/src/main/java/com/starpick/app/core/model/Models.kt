@@ -49,6 +49,9 @@ data class WatchProgress(
     val key: String,
     val title: String,
     val cover: String,
+    /** 上次播放用的源，用于详情页自动切回该源；老记录为空。 */
+    val sourceId: String = "",
+    val vodId: String = "",
     val groupIndex: Int,
     val episodeIndex: Int,
     val episodeName: String,
