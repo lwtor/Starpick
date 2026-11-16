@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -36,6 +37,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -45,6 +47,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -213,19 +216,11 @@ fun DiscoverScreen(
                 if (progress.isNotEmpty()) {
                     item { SectionHeader(title = "继续观看") }
                     item {
-                        LazyRow(
-                            contentPadding = PaddingValues(horizontal = 20.dp),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        ) {
-                            items(progress.take(8), key = { it.key }) { record ->
-                                val item = recent.firstOrNull { it.key == record.key }
-                                ContinueCard(
-                                    record = record,
-                                    enabled = item != null,
-                                    onClick = { if (item != null) onResume(item, record) },
-                                )
-                            }
-                        }
+                        ContinueWatchingRow(
+                            progress = progress.take(8),
+                            recent = recent,
+                            onResume = onResume,
+                        )
                     }
                 }
 
@@ -470,6 +465,56 @@ private fun HeroSection(subjects: List<DoubanSubject>, onPick: (String) -> Unit)
     }
 }
 
+/**
+ * 继续观看横滑行。
+ *
+ * 横滑列表总会在屏幕边缘切住下一张卡；纯硬切会把片名断成半截（「黄子华栋…」），
+ * 看着像渲染坏了。这里在「右边还有内容」时往右边缘叠一层底色渐变，
+ * 把硬切变成渐隐：滑动提示还在，字也不会被削掉一半。滑到底自动消失。
+ */
+@Composable
+private fun ContinueWatchingRow(
+    progress: List<WatchProgress>,
+    recent: List<VodItem>,
+    onResume: (VodItem, WatchProgress) -> Unit,
+) {
+    val rowState = rememberLazyListState()
+    val showFade by remember { derivedStateOf { rowState.canScrollForward } }
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .drawWithContent {
+                drawContent()
+                if (showFade) {
+                    val fade = 30.dp.toPx()
+                    drawRect(
+                        brush = Brush.horizontalGradient(
+                            colors = listOf(Color.Transparent, Ink.Base),
+                            startX = size.width - fade,
+                            endX = size.width,
+                        ),
+                    )
+                }
+            },
+    ) {
+        LazyRow(
+            state = rowState,
+            contentPadding = PaddingValues(horizontal = 20.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            items(progress, key = { it.key }) { record ->
+                val item = recent.firstOrNull { it.key == record.key }
+                ContinueCard(
+                    record = record,
+                    enabled = item != null,
+                    onClick = { if (item != null) onResume(item, record) },
+                )
+            }
+        }
+    }
+}
+
 /** 继续观看卡片：16:9 缩略图 + 播放图标 + 进度条。 */
 @Composable
 private fun ContinueCard(record: WatchProgress, enabled: Boolean, onClick: () -> Unit) {
@@ -479,10 +524,10 @@ private fun ContinueCard(record: WatchProgress, enabled: Boolean, onClick: () ->
         0f
     }
     val remainMinutes = (record.durationMs - record.positionMs).coerceAtLeast(0L) / 60_000
+    // 圆角只裁缩略图。整列裁圆角会把底部「第1集 · 剩 46 分钟」的左右下角削掉。
     Column(
         modifier = Modifier
             .width(146.dp)
-            .clip(RoundedCornerShape(10.dp))
             .clickable(enabled = enabled, onClick = onClick),
     ) {
         Box(
