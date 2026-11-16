@@ -201,7 +201,7 @@ fun DetailScreen(
                 modifier = if (isLandscape && playing != null) {
                     Modifier.fillMaxSize()
                 } else {
-                    Modifier.fillMaxWidth().aspectRatio(16f / 9f)
+                    Modifier.fillMaxWidth().aspectRatio(5f / 3f)
                 },
             ) {
             Crossfade(

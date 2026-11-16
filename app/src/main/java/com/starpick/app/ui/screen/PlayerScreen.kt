@@ -70,6 +70,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.starpick.app.AppContainer
 import com.starpick.app.core.model.VodItem
@@ -305,6 +306,8 @@ fun PlayerSurface(
                         FrameLayout.LayoutParams.MATCH_PARENT,
                     )
                     this.player = player
+                    // 顶部容器为 5:3，视频按裁剪填充，避免上下黑边。
+                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                     // 默认控制器样式与深色设计冲突，全部自绘。
                     useController = false
                 }
