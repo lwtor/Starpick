@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -29,6 +30,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -68,7 +70,6 @@ import com.starpick.app.ui.component.FlowPosterGrid
 import com.starpick.app.ui.component.LineChip
 import com.starpick.app.ui.component.PrimaryButton
 import com.starpick.app.ui.component.SectionHeader
-import com.starpick.app.ui.component.SquareIconButton
 import com.starpick.app.ui.theme.Accent
 import com.starpick.app.ui.theme.Ink
 import kotlinx.coroutines.Dispatchers
@@ -184,19 +185,25 @@ fun DetailScreen(
     }
     val episodes = playGroups.getOrNull(lineIndex)?.episodes.orEmpty()
 
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(if (isLandscape && playing != null) Color.Black else Ink.Base),
     ) {
-        // ── 1. 顶部：封面（豆瓣海报）⇄ 播放器，Crossfade 平滑切换，盒子尺寸一致。
-        Box(
-            modifier = if (isLandscape && playing != null) {
-                Modifier.fillMaxSize()
-            } else {
-                Modifier.fillMaxWidth().aspectRatio(16f / 9f).statusBarsPadding()
-            },
+        // 状态栏避让放在内容列外层，顶部盒子才能严格保持 16:9。
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .then(if (isLandscape && playing != null) Modifier else Modifier.statusBarsPadding()),
         ) {
+            // ── 1. 顶部：严格 16:9 的封面（豆瓣海报）⇄ 播放器，Crossfade 平滑切换。
+            Box(
+                modifier = if (isLandscape && playing != null) {
+                    Modifier.fillMaxSize()
+                } else {
+                    Modifier.fillMaxWidth().aspectRatio(16f / 9f)
+                },
+            ) {
             Crossfade(
                 targetState = playing != null,
                 animationSpec = tween(durationMillis = 320),
@@ -286,14 +293,13 @@ fun DetailScreen(
                     ) { expanded = !expanded }
                 }
 
-                // 收藏入口（详情信息卡下方，避免占用封面区）。
-                item {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        if (playing == null) {
+                // 播放入口（收藏已改为顶部悬浮 FAB）。
+                if (playing == null) {
+                    item {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
                             val record = resumeRecord
                             val label = when {
                                 record != null -> "继续观看 ${record.episodeName.ifBlank { "上次进度" }}"
@@ -303,7 +309,7 @@ fun DetailScreen(
                             PrimaryButton(
                                 text = label,
                                 icon = Icons.Filled.PlayArrow,
-                                modifier = Modifier.weight(1f),
+                                modifier = Modifier.fillMaxWidth(),
                                 enabled = record != null || episodes.isNotEmpty(),
                                 onClick = {
                                     if (record != null) {
@@ -314,17 +320,6 @@ fun DetailScreen(
                                 },
                             )
                         }
-                        SquareIconButton(
-                            icon = if (favorite) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
-                            contentDescription = "收藏",
-                            active = favorite,
-                            onClick = {
-                                scope.launch {
-                                    container.store.toggleFavorite(resolved)
-                                    favorite = container.store.isFavorite(resolved.key)
-                                }
-                            },
-                        )
                     }
                 }
 
@@ -416,6 +411,30 @@ fun DetailScreen(
                         }
                     }
                 }
+            }
+        }
+    }
+
+        // 收藏改为悬浮 FAB：竖屏常驻右下角，横屏全屏播放时让位给播放器。
+        if (!(isLandscape && playing != null)) {
+            FloatingActionButton(
+                onClick = {
+                    scope.launch {
+                        container.store.toggleFavorite(resolved)
+                        favorite = container.store.isFavorite(resolved.key)
+                    }
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(16.dp)
+                    .navigationBarsPadding(),
+                containerColor = if (favorite) Accent.Gold else Ink.Raised,
+                contentColor = if (favorite) Color.Black else Ink.Text1,
+            ) {
+                Icon(
+                    imageVector = if (favorite) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
+                    contentDescription = "收藏",
+                )
             }
         }
     }
