@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.OpenInBrowser
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -42,6 +43,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -144,6 +146,12 @@ fun SettingsScreen(container: AppContainer) {
                     },
                     onClick = { showAddSheet = true },
                 )
+            }
+        }
+
+        item {
+            GroupCard(title = "播放缓存") {
+                MediaCacheRow(container)
             }
         }
 
@@ -603,8 +611,78 @@ private fun BrowserLink(
     }
 }
 
+/**
+ * 播放缓存行：显示占用 / 上限，可一键清空。
+ *
+ * 缓存是「边看边写」的副产物，用户看不见它从哪来，所以这里必须给出
+ * 明确的三件事：占了多少、最多能占多少、怎么清掉。
+ */
+@Composable
+private fun MediaCacheRow(container: AppContainer) {
+    val scope = rememberCoroutineScope()
+    var used by remember { mutableLongStateOf(0L) }
+    var clearing by remember { mutableStateOf(false) }
+    var notice by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(Unit) {
+        used = withContext(Dispatchers.IO) { container.mediaCacheBytes }
+    }
+
+    RowItem(
+        title = "边看边缓存",
+        subtitle = notice ?: "已用 ${formatCacheSize(used)} / 上限 " +
+            "${formatCacheSize(container.mediaCacheLimitBytes)}，重看不重复下载",
+        first = true,
+        showChevron = false,
+        leading = {
+            Icon(
+                imageVector = Icons.Filled.Storage,
+                contentDescription = null,
+                tint = Ink.Text2,
+                modifier = Modifier.size(18.dp),
+            )
+        },
+        trailing = {
+            if (clearing) {
+                CircularProgressIndicator(
+                    color = Accent.Gold,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(18.dp),
+                )
+            } else {
+                GhostButton(
+                    text = "清除",
+                    modifier = Modifier.height(34.dp),
+                    enabled = used > 0,
+                    onClick = {
+                        scope.launch {
+                            clearing = true
+                            notice = null
+                            val freed = container.clearMediaCache()
+                            used = withContext(Dispatchers.IO) { container.mediaCacheBytes }
+                            clearing = false
+                            notice = if (freed > 0) {
+                                "已清除 ${formatCacheSize(freed)}，之后播放会重新累积"
+                            } else {
+                                "缓存本来就是空的"
+                            }
+                        }
+                    },
+                )
+            }
+        },
+    )
+}
+
 private fun formatMegabytes(bytes: Long): String =
     "%.1f MB".format(bytes / 1024.0 / 1024.0)
+
+/** 缓存大小按量级取单位，1 GB 上限显示成「1.0 GB」比「1024 MB」好读。 */
+private fun formatCacheSize(bytes: Long): String = when {
+    bytes >= 3L * 1024 * 1024 * 1024 -> "%.1f GB".format(bytes / 1024.0 / 1024.0 / 1024.0)
+    bytes >= 1024L * 1024 * 1024 -> "%.2f GB".format(bytes / 1024.0 / 1024.0 / 1024.0)
+    else -> "%.0f MB".format(bytes / 1024.0 / 1024.0)
+}
 
 private val WarnColor = Color(0xFFFF6B6B)
 

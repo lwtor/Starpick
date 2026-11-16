@@ -83,7 +83,6 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
-import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
@@ -204,15 +203,11 @@ fun PlayerSurface(
     }
 
     val player = remember(ready, reloadToken) {
-        // 采集站的 CDN 普遍按 UA 拦请求、且经常 302 跳到 http，
-        // 默认数据源既不带浏览器 UA 也不允许跨协议重定向，会直接判成「播不出来」。
-        val dataSource = DefaultHttpDataSource.Factory()
-            .setUserAgent(HTTP_USER_AGENT)
-            .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(15_000)
-            .setReadTimeoutMs(20_000)
+        // 用容器的带缓存数据源：上游仍是「浏览器 UA + 允许跨协议重定向」的 HttpDataSource
+        // （采集站 CDN 普遍按 UA 拦请求、且经常 302 跳到 http），前面多一层磁盘缓存，
+        // 同一集重复播放 / 拖回看过的位置不再重新下载。
         ExoPlayer.Builder(context)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSource))
+            .setMediaSourceFactory(DefaultMediaSourceFactory(container.cachedDataSourceFactory))
             .build()
             .apply {
                 setMediaItem(
@@ -1032,10 +1027,6 @@ private fun Throwable.causedByUnknownHost(): Boolean {
     }
     return false
 }
-
-private const val HTTP_USER_AGENT =
-    "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) " +
-        "Chrome/122.0 Mobile Safari/537.36"
 
 private fun formatSpeed(speed: Float): String =
     if (speed == speed.toInt().toFloat()) speed.toInt().toString() else speed.toString()

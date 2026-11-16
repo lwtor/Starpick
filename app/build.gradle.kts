@@ -14,7 +14,7 @@ android {
         // versionCode 必须与 updater 的 TagScheme（major*1e6 + minor*1e3 + patch）一致，
         // 否则 GitHub tag 折算值永远小于已装版本，更新检查会误判为「已是最新」。
         // 从这里自动推导，避免手写错位数（0.8.1 曾误写成 8100，应为 8001）。
-        val appVersion = "0.9.10"
+        val appVersion = "0.9.11"
         val seg = appVersion.split(".").map { it.toInt() }
         versionCode = seg[0] * 1_000_000 + seg[1] * 1_000 + seg[2]
         versionName = appVersion
@@ -48,6 +48,8 @@ dependencies {
 
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.exoplayer.hls)
+    implementation(libs.media3.datasource)
+    implementation(libs.media3.database)
     implementation(libs.media3.ui)
 
     implementation(libs.ktor.client.core)

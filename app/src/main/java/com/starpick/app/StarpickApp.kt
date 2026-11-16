@@ -4,6 +4,14 @@ import android.app.Application
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.StatFs
+import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.cache.CacheDataSource
+import androidx.media3.datasource.cache.CacheKeyFactory
+import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
+import androidx.media3.datasource.cache.SimpleCache
+import androidx.media3.database.StandaloneDatabaseProvider
 import coil3.ImageLoader
 import coil3.SingletonImageLoader
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
@@ -28,6 +36,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -65,6 +74,8 @@ class StarpickApp : Application() {
         configureImageLoader()
         container = AppContainer(this)
         container.checkUpdate()
+        // 预热磁盘缓存：首次创建 SimpleCache 要打开 SQLite，别让它落在第一帧播放上。
+        container.appScope.launch { runCatching { container.mediaCache } }
     }
 
     /**
@@ -119,6 +130,78 @@ class AppContainer(context: Context) {
 
     /** 播放地址探测：把分享页 / 藏了扩展名的 HLS 地址转成播放器能直接吃的形式。 */
     val streams = StreamResolver(httpClient)
+
+    // ── 播放缓存（边看边缓存）──────────────────────────────────────
+
+    /**
+     * 磁盘缓存上限：取设备可用空间的 1/12，夹在 512 MB ~ 2 GB。
+     *
+     * 固定值要么浪费（大存储只给 512 MB），要么撑爆（小机器给 2 GB）；
+     * 1/12 大约等于「用掉 8%」，留足空间给系统和其它 App。
+     */
+    val mediaCacheLimitBytes: Long = run {
+        val available = runCatching { StatFs(appContext.cacheDir.path).availableBytes }
+            .getOrDefault(0L)
+        (available / 12)
+            .coerceIn(256L * MB, 2048L * MB)
+            // 存储特别紧张时最多只占三分之一，别把设备写满。
+            .coerceAtMost((available / 3).coerceAtLeast(128L * MB))
+    }
+
+    /**
+     * 边看边缓存。用的是 Media3 官方 `CacheDataSource` + `SimpleCache`，
+     * 不是 AndroidVideoCache 那类本地代理库 —— 后者已停止维护、且不支持 HLS，
+     * 而星匣的采集源大部分是 m3u8。
+     *
+     * 两点约束：
+     *  - 同一目录只能有一个 SimpleCache 实例，所以挂在容器上随进程存活；
+     *  - 放 external-files 而不是 cacheDir：系统空间不足时会把 cacheDir 整片删掉，
+     *    索引与分片对不上会让缓存读取直接报错。
+     */
+    val mediaCache: SimpleCache by lazy {
+        val root = appContext.getExternalFilesDir("media") ?: appContext.filesDir
+        SimpleCache(
+            File(root, "video-cache"),
+            LeastRecentlyUsedCacheEvictor(mediaCacheLimitBytes),
+            StandaloneDatabaseProvider(appContext),
+        )
+    }
+
+    /** 已占用的缓存字节数（读到的是内存里的索引，很快）。 */
+    val mediaCacheBytes: Long
+        get() = mediaCache.cacheSpace
+
+    /**
+     * 带磁盘缓存的网络源。上游仍是原来那个「浏览器 UA + 允许跨协议重定向」的
+     * HttpDataSource，行为不变，只是前面多了一层磁盘缓存：
+     * 同一地址重复播放、拖动回看都不再重新下载。
+     *
+     * `FLAG_IGNORE_CACHE_ON_ERROR`：缓存文件损坏 / 被清掉时直接回源，而不是报错。
+     */
+    val cachedDataSourceFactory: CacheDataSource.Factory by lazy {
+        val upstream = DefaultHttpDataSource.Factory()
+            .setUserAgent(HTTP_USER_AGENT)
+            .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(15_000)
+            .setReadTimeoutMs(20_000)
+        CacheDataSource.Factory()
+            .setCache(mediaCache)
+            .setUpstreamDataSourceFactory(upstream)
+            .setCacheKeyFactory(
+                object : CacheKeyFactory {
+                    override fun buildCacheKey(dataSpec: DataSpec): String =
+                        cacheKeyOf(dataSpec.uri.toString())
+                },
+            )
+            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+    }
+
+    /** 清空播放缓存，返回释放的字节数。内部已切 IO，调用方直接 await 即可。 */
+    suspend fun clearMediaCache(): Long = withContext(Dispatchers.IO) {
+        val before = mediaCacheBytes
+        mediaCache.keys.toList().forEach { mediaCache.removeResource(it) }
+        (before - mediaCacheBytes).coerceAtLeast(0L)
+    }
 
     /**
      * GitHub Release 应用内自升级。owner/repository 指向发布 APK 的公开仓库。
@@ -263,5 +346,30 @@ class AppContainer(context: Context) {
         /** 与 [UpdaterConfig] 里的 owner / repository / fallbackAssetName 保持一致。 */
         const val LATEST_APK_URL =
             "https://github.com/lwtor/Starpick/releases/latest/download/Starpick.apk"
+
+        const val MB = 1024L * 1024
+
+        /**
+         * HLS / DASH 播放列表按「小时桶」做缓存 key。
+         *
+         * 列表本身只有几 KB，但它决定分片地址：如果永久缓存，源站换了 CDN 或重新切片后
+         * 会一直用旧地址。按小时分桶既能让一集内反复拖动命中缓存，又保证跨小时自动失效。
+         * 分片（.ts/.m4s/.mp4）仍按真实 URL 缓存 —— 体积的 99% 在这里，重看才算真省钱。
+         */
+        const val PLAYLIST_BUCKET_MS = 60L * 60L * 1000L
+
+        const val HTTP_USER_AGENT =
+            "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/122.0 Mobile Safari/537.36"
+
+        fun cacheKeyOf(url: String): String {
+            val isPlaylist = url.contains(".m3u8", ignoreCase = true) ||
+                url.contains(".mpd", ignoreCase = true)
+            return if (isPlaylist) {
+                "$url#${System.currentTimeMillis() / PLAYLIST_BUCKET_MS}"
+            } else {
+                url
+            }
+        }
     }
 }
