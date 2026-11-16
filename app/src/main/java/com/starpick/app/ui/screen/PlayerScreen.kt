@@ -118,6 +118,8 @@ fun PlayerSurface(
     onExit: () -> Unit,
     /** 播放失败时让详情页重新拉一次详情，拿到刷新后的播放地址。 */
     onRefreshSource: () -> Unit = {},
+    /** 播放失败时切到下一个源（采集站换源经常能救回来）。 */
+    onSwitchSource: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -227,11 +229,14 @@ fun PlayerSurface(
     // 竖屏时禁用，返回交给详情页处理（直接退出详情，不再多一层"收起播放器"）。
     BackHandler(enabled = isLandscape && !showSheet) { exitFullscreen() }
 
-    // 引入时恢复进度（仅当记录属于当前线路 + 当前集）。
+    // 引入时恢复进度。必须同源同线路同集：换了源之后进度就不可比了，
+    // 硬跳过去会落到一个不存在的时长上（表现为一进去就卡住/黑屏）。
     LaunchedEffect(player, item.key) {
         withContext(Dispatchers.Main.immediate) {
             val saved = container.store.progressFor(item.contentKey)
             if (saved != null &&
+                saved.sourceId == item.sourceId &&
+                saved.vodId == item.vodId &&
                 saved.groupIndex == groupIndex &&
                 saved.episodeIndex == safeEpisode &&
                 saved.positionMs > 0
@@ -267,6 +272,13 @@ fun PlayerSurface(
         }
         player.addListener(listener)
         onDispose { player.removeListener(listener) }
+    }
+
+    // 卡在缓冲 15 秒就当失败：源站不响应时不能一直转圈下去。
+    LaunchedEffect(buffering, failure) {
+        if (!buffering || failure != null) return@LaunchedEffect
+        delay(15_000)
+        if (failure == null) failure = "加载超时：源站没有响应"
     }
 
     // 500ms 轮询：刷新 UI 状态；每 5 秒落一次盘。
@@ -429,7 +441,21 @@ fun PlayerSurface(
                         maxLines = 3,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    Text(
+                        text = ready.url.substringAfter("://").substringBefore("/"),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0x59FFFFFF),
+                    )
+                    Spacer(Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        if (onSwitchSource != null) {
+                            OverlayButton("换源") {
+                                failure = null
+                                buffering = true
+                                autoRetried = false
+                                onSwitchSource()
+                            }
+                        }
                         OverlayButton("重试") {
                             failure = null
                             buffering = true

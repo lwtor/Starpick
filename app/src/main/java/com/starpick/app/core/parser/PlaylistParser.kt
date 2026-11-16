@@ -53,7 +53,38 @@ object PlaylistParser {
         return Episode(name, url)
     }
 
+    /**
+     * 首选线路：采集站常把「分享页」线路排在第一条（`/share/<hash>`，返回网页或藏了扩展名的流），
+     * 真正的 `.../index.m3u8` 往往在后面。默认播第 0 条就会一直转圈/解析失败，
+     * 所以优先挑一条「地址像视频流」的线路；都不像时退回第 0 条。
+     */
+    fun preferredGroupIndex(groups: List<PlayGroup>): Int {
+        val direct = groups.indexOfFirst { group ->
+            group.episodes.any { StreamUrl.looksDirect(it.url) }
+        }
+        return if (direct >= 0) direct else 0
+    }
+
     /** 聚合搜索时的标题归一：去掉空白、标点与常见分隔符。 */
     /** 搜索结果的分组键，与观看历史的归并键保持一致。 */
     fun normalizeTitle(title: String): String = contentKeyOf(title)
 }
+
+/**
+ * 判断一个播放地址是不是「一眼能看出是视频」的直链。
+ *
+ * 采集站给的地址有两种：带扩展名的直链，以及扩展名被藏起来的 `/share/<hash>`。
+ * 后者要么是网页、要么是伪装成普通路径的 HLS，播放器按扩展名判断都会出错。
+ */
+object StreamUrl {
+
+    private val DIRECT_EXTENSION = Regex(
+        "\\.(m3u8|mp4|flv|mkv|ts|mov|m4v)([?#]|$)",
+        RegexOption.IGNORE_CASE,
+    )
+
+    fun looksDirect(url: String): Boolean = DIRECT_EXTENSION.containsMatchIn(url)
+}
+
+/** 这条线路里有没有「一眼像视频流」的地址。 */
+fun PlayGroup.isDirect(): Boolean = episodes.any { StreamUrl.looksDirect(it.url) }

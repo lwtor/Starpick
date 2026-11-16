@@ -4,6 +4,7 @@ import io.ktor.client.HttpClient
 import io.ktor.client.request.get
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpHeaders
+import com.starpick.app.core.parser.StreamUrl
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -21,7 +22,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 class StreamResolver(private val client: HttpClient) {
 
     suspend fun resolve(rawUrl: String): ResolvedStream {
-        if (looksDirect(rawUrl)) return ResolvedStream(rawUrl)
+        if (StreamUrl.looksDirect(rawUrl)) return ResolvedStream(rawUrl)
         return withTimeoutOrNull(PROBE_TIMEOUT_MS) {
             probe(rawUrl)
         } ?: ResolvedStream(rawUrl)
@@ -71,18 +72,12 @@ class StreamResolver(private val client: HttpClient) {
             "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) " +
                 "Chrome/122.0 Mobile Safari/537.36"
 
-        private val DIRECT_EXTENSION = Regex(
-            "\\.(m3u8|mp4|flv|mkv|ts|mov|m4v)([?#]|$)",
-            RegexOption.IGNORE_CASE,
-        )
         private val M3U8_PATTERN = Regex(
             "https?://[^\"'\\s<>\\\\]+\\.m3u8[^\"'\\s<>\\\\]*",
         )
         private val MP4_PATTERN = Regex(
             "https?://[^\"'\\s<>\\\\]+\\.mp4[^\"'\\s<>\\\\]*",
         )
-
-        fun looksDirect(url: String): Boolean = DIRECT_EXTENSION.containsMatchIn(url)
     }
 }
 

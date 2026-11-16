@@ -64,6 +64,7 @@ import com.starpick.app.core.model.VodItem
 import com.starpick.app.core.model.WatchProgress
 import com.starpick.app.core.model.contentKeyOf
 import com.starpick.app.core.parser.PlaylistParser
+import com.starpick.app.core.parser.isDirect
 import com.starpick.app.ui.component.EmptyState
 import com.starpick.app.ui.component.EpisodeCell
 import com.starpick.app.ui.component.FlowPosterGrid
@@ -155,7 +156,14 @@ fun DetailScreen(
         if (initialPlay != null) {
             // 换到别的源时线路/集数可能都比记录少，两个下标都要 clamp，否则会黑屏。
             val lines = PlaylistParser.parse(base.playFrom, base.playUrl)
-            val groupIndex = initialPlay.groupIndex.coerceIn(0, (lines.size - 1).coerceAtLeast(0))
+            val recorded = initialPlay.groupIndex.coerceIn(0, (lines.size - 1).coerceAtLeast(0))
+            // 记录里那条线路如果是分享页（`/share/<hash>`）就换一条真正的视频流线路：
+            // 采集站常把分享页排在第一条，默认播它只会一直转圈。
+            val groupIndex = if (lines.getOrNull(recorded)?.isDirect() == true) {
+                recorded
+            } else {
+                PlaylistParser.preferredGroupIndex(lines)
+            }
             val episodeCount = lines.getOrNull(groupIndex)?.episodes?.size ?: 0
             val episodeIndex = initialPlay.episodeIndex.coerceIn(0, (episodeCount - 1).coerceAtLeast(0))
             lineIndex = groupIndex
@@ -203,11 +211,14 @@ fun DetailScreen(
             }
             val record = container.store.progressFor(base.contentKey)
             resumeRecord = record
-            val wanted = if (record != null && record.sourceId == base.sourceId && record.vodId == base.vodId) {
-                record.groupIndex
-            } else 0
-            val count = PlaylistParser.parse(base.playFrom, base.playUrl).size
-            lineIndex = wanted.coerceIn(0, (count - 1).coerceAtLeast(0))
+            val lines = PlaylistParser.parse(base.playFrom, base.playUrl)
+            val preferred = PlaylistParser.preferredGroupIndex(lines)
+            // 记录里那条线路若不是直链（分享页），改用像视频流的那条线路。
+            val recorded = record
+                ?.takeIf { it.sourceId == base.sourceId && it.vodId == base.vodId }
+                ?.groupIndex
+                ?.takeIf { lines.getOrNull(it)?.isDirect() == true }
+            lineIndex = (recorded ?: preferred).coerceIn(0, (lines.size - 1).coerceAtLeast(0))
             favorite = container.store.isFavorite(base.key)
         }
     }
@@ -258,6 +269,19 @@ fun DetailScreen(
         }
     }
 
+    // 播放失败时切到下一个源：采集站的线路互相独立，换一个往往就能看了。
+    val switchSource: () -> Unit = {
+        val active = playing
+        if (active != null && items.size > 1) {
+            val index = items.indexOfFirst { it.key == active.item.key }
+            val next = items[(index + 1).mod(items.size)]
+            selected = next
+            resolved = next
+            val lines = PlaylistParser.parse(next.playFrom, next.playUrl)
+            playing = PlayTarget(next, PlaylistParser.preferredGroupIndex(lines), 0)
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -294,6 +318,7 @@ fun DetailScreen(
                             onEpisodeChange = { e -> playing = playing?.copy(episodeIndex = e) },
                             onExit = onBack,
                             onRefreshSource = refreshSource,
+                            onSwitchSource = switchSource,
                             modifier = Modifier.fillMaxSize(),
                         )
                     }
