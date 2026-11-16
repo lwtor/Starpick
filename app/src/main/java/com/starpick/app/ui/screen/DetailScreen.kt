@@ -125,7 +125,7 @@ fun DetailScreen(
             resolved = base
             lineIndex = 0
             favorite = container.store.isFavorite(base.key)
-            resumeRecord = container.store.progressFor(base.key)
+            resumeRecord = container.store.progressFor(base.contentKey)
         }
     }
 

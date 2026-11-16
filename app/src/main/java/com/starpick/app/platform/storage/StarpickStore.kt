@@ -3,6 +3,7 @@ package com.starpick.app.platform.storage
 import android.content.Context
 import com.starpick.app.core.model.SourceSite
 import com.starpick.app.core.model.VodItem
+import com.starpick.app.core.model.contentKeyOf
 import com.starpick.app.core.model.WatchProgress
 import com.starpick.app.core.repository.LibraryRepository
 import com.starpick.app.core.repository.SourceRepository
@@ -88,14 +89,17 @@ class StarpickStore(context: Context) : SourceRepository, LibraryRepository {
         )
     }
 
-    /** 打开详情时缓存一份完整条目，供「继续观看」重新进入播放页。 */
+    /** 打开详情时缓存一份完整条目，供「继续观看」重新进入播放页。同一部剧的不同源只留最新一份。 */
     suspend fun rememberItem(item: VodItem) = mutate { snapshot ->
         snapshot.copy(
-            recent = (listOf(item) + snapshot.recent.filterNot { it.key == item.key }).take(RECENT_LIMIT),
+            recent = (
+                listOf(item) + snapshot.recent.filterNot { it.contentKey == item.contentKey }
+                ).take(RECENT_LIMIT),
         )
     }
 
-    fun itemFor(key: String): VodItem? = state.value.recent.firstOrNull { it.key == key }
+    fun itemFor(key: String): VodItem? =
+        state.value.recent.firstOrNull { it.contentKey == key }
 
     override suspend fun progressFor(key: String): WatchProgress? =
         state.value.progress.firstOrNull { it.key == key }
@@ -173,7 +177,14 @@ class StarpickStore(context: Context) : SourceRepository, LibraryRepository {
     private fun JsonObject.toState(): State = State(
         sources = array("sources").mapNotNull { (it as? JsonObject)?.toSourceSite() },
         favorites = array("favorites").mapNotNull { (it as? JsonObject)?.toVodItem() },
-        progress = array("progress").mapNotNull { (it as? JsonObject)?.toProgress() },
+        // 老版本把 key 存成 sourceId:vodId，同一部剧的每个源各一条。
+        // 加载时统一折算成内容 key 并按最新一条去重，用户不需要手动清理旧记录。
+        progress = array("progress")
+            .mapNotNull { (it as? JsonObject)?.toProgress() }
+            .filter { it.title.isNotBlank() }
+            .map { it.copy(key = contentKeyOf(it.title)) }
+            .groupBy { it.key }
+            .values.mapNotNull { group -> group.maxByOrNull { it.updatedAt } },
         recent = array("recent").mapNotNull { (it as? JsonObject)?.toVodItem() },
         searchHistory = array("searchHistory")
             .mapNotNull { (it as? JsonPrimitive)?.content?.takeIf(String::isNotBlank) }

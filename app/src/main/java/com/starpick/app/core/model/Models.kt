@@ -28,9 +28,15 @@ data class VodItem(
     val playFrom: String = "",
     val playUrl: String = "",
 ) {
-    /** 收藏与观看进度使用的稳定标识；同一部剧来自不同源时各自独立记录。 */
+    /** 收藏使用的稳定标识；同一部剧来自不同源时收藏各自独立。 */
     val key: String get() = "$sourceId:$vodId"
+
+    /** 观看历史按内容归并：同一部剧不管来自哪个源、哪条线路，只算一条。 */
+    val contentKey: String get() = contentKeyOf(title)
 }
+
+/** 观看历史的归并键。用片名（忽略大小写与首尾空白），不含源与线路。 */
+fun contentKeyOf(title: String): String = title.trim().lowercase()
 
 data class Episode(val name: String, val url: String)
 

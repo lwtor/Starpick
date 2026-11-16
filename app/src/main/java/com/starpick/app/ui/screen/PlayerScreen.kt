@@ -184,7 +184,7 @@ fun PlayerScreen(
     // 引入时恢复进度（仅当记录属于当前线路 + 当前集）。
     LaunchedEffect(player, item.key) {
         withContext(Dispatchers.Main.immediate) {
-            val saved = container.store.progressFor(item.key)
+            val saved = container.store.progressFor(item.contentKey)
             if (saved != null &&
                 saved.groupIndex == currentGroup &&
                 saved.episodeIndex == safeEpisode &&
@@ -216,7 +216,7 @@ fun PlayerScreen(
             if (++tick % 10 == 0) {
                 container.store.saveProgress(
                     WatchProgress(
-                        key = item.key,
+                        key = item.contentKey,
                         title = item.title,
                         cover = item.cover,
                         groupIndex = currentGroup,
@@ -235,7 +235,7 @@ fun PlayerScreen(
     DisposableEffect(player) {
         onDispose {
             val record = WatchProgress(
-                key = item.key,
+                key = item.contentKey,
                 title = item.title,
                 cover = item.cover,
                 groupIndex = currentGroup,

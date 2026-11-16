@@ -176,7 +176,7 @@ fun HomeScreen(
                     }
                 } else {
                     items(progress, key = { it.key }) { record ->
-                        val item = recent.firstOrNull { it.key == record.key }
+                        val item = recent.firstOrNull { it.contentKey == record.key }
                         val fraction = if (record.durationMs > 0) {
                             (record.positionMs.toFloat() / record.durationMs).coerceIn(0f, 1f)
                         } else {
@@ -198,7 +198,8 @@ fun HomeScreen(
                             },
                             cover = record.cover,
                             progress = fraction,
-                            enabled = item != null,
+                            // 编辑态强制可点：即使缓存条目丢失（行会置灰），也必须能勾选删除。
+                            enabled = item != null || editing,
                             leading = if (editing) {
                                 { SelectCircle(selected = selected) }
                             } else {
