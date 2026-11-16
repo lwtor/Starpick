@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -48,6 +49,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -69,10 +71,15 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.starpick.app.AppContainer
+import com.starpick.app.core.api.ResolvedStream
 import com.starpick.app.core.model.VodItem
 import com.starpick.app.core.model.WatchProgress
 import com.starpick.app.core.parser.PlaylistParser
@@ -109,6 +116,8 @@ fun PlayerSurface(
     onGroupChange: (Int) -> Unit,
     onEpisodeChange: (Int) -> Unit,
     onExit: () -> Unit,
+    /** 播放失败时让详情页重新拉一次详情，拿到刷新后的播放地址。 */
+    onRefreshSource: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -142,17 +151,58 @@ fun PlayerSurface(
                         .clickable(onClick = onExit)
                         .padding(8.dp),
                 )
+                OverlayButton("重新获取地址") { onRefreshSource() }
             }
         }
         return
     }
 
-    val player = remember(currentUrl) {
-        ExoPlayer.Builder(context).build().apply {
-            setMediaItem(MediaItem.fromUri(currentUrl))
-            playWhenReady = true
-            prepare()
+    // 播放失败 / 重试：reloadToken 变化就会重建播放器。
+    var reloadToken by remember { mutableIntStateOf(0) }
+    var failure by remember(currentUrl, reloadToken) { mutableStateOf<String?>(null) }
+    var buffering by remember(currentUrl, reloadToken) { mutableStateOf(true) }
+    // 每个播放地址只静默重试一次，避免坏地址无限重连。
+    var autoRetried by remember(currentUrl) { mutableStateOf(false) }
+
+    // 采集站的地址不一定是直链：`/share/<hash>` 这类藏了扩展名的 HLS、或者干脆是分享网页，
+    // 原样丢给播放器会解析失败。先探一次，再按探测结果给 MIME 提示。
+    var stream by remember(currentUrl) { mutableStateOf<ResolvedStream?>(null) }
+    LaunchedEffect(currentUrl) {
+        stream = withContext(Dispatchers.IO) { container.streams.resolve(currentUrl) }
+    }
+    val ready = stream
+    if (ready == null) {
+        Box(modifier = modifier.background(Color.Black), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(28.dp),
+                color = Accent.Gold,
+                strokeWidth = 2.dp,
+            )
         }
+        return
+    }
+
+    val player = remember(ready, reloadToken) {
+        // 采集站的 CDN 普遍按 UA 拦请求、且经常 302 跳到 http，
+        // 默认数据源既不带浏览器 UA 也不允许跨协议重定向，会直接判成「播不出来」。
+        val dataSource = DefaultHttpDataSource.Factory()
+            .setUserAgent(HTTP_USER_AGENT)
+            .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(15_000)
+            .setReadTimeoutMs(20_000)
+        ExoPlayer.Builder(context)
+            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSource))
+            .build()
+            .apply {
+                setMediaItem(
+                    MediaItem.Builder()
+                        .setUri(ready.url)
+                        .apply { if (ready.mimeType != null) setMimeType(ready.mimeType) }
+                        .build(),
+                )
+                playWhenReady = true
+                prepare()
+            }
     }
 
     var playbackSpeed by remember { mutableFloatStateOf(1f) }
@@ -189,6 +239,34 @@ fun PlayerSurface(
                 player.seekTo(saved.positionMs)
             }
         }
+    }
+
+    // 播放状态与错误：坏地址不再是一片没有反馈的黑屏。
+    DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                when (playbackState) {
+                    Player.STATE_BUFFERING -> buffering = true
+                    Player.STATE_READY, Player.STATE_ENDED -> {
+                        buffering = false
+                        failure = null
+                    }
+                    else -> Unit
+                }
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                buffering = false
+                if (!autoRetried) {
+                    autoRetried = true
+                    reloadToken++
+                } else {
+                    failure = describePlaybackError(error)
+                }
+            }
+        }
+        player.addListener(listener)
+        onDispose { player.removeListener(listener) }
     }
 
     // 500ms 轮询：刷新 UI 状态；每 5 秒落一次盘。
@@ -327,6 +405,52 @@ fun PlayerSurface(
                     )
                 },
         )
+
+        // 失败时给出可操作的出口，而不是继续转圈。
+        val errorText = failure
+        if (errorText != null) {
+            Box(
+                modifier = Modifier.fillMaxSize().background(Color(0xD9000000)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = "播放失败",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = Color.White,
+                    )
+                    Text(
+                        text = errorText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0x99FFFFFF),
+                        modifier = Modifier
+                            .padding(horizontal = 24.dp, vertical = 6.dp)
+                            .width(if (isLandscape) 420.dp else 260.dp),
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OverlayButton("重试") {
+                            failure = null
+                            buffering = true
+                            autoRetried = false
+                            reloadToken++
+                            onRefreshSource()
+                        }
+                        if (safeEpisode < episodes.size - 1) {
+                            OverlayButton("下一集") { playEpisode(safeEpisode + 1) }
+                        }
+                        OverlayButton("返回") { onExit() }
+                    }
+                }
+            }
+        } else if (buffering) {
+            CircularProgressIndicator(
+                modifier = Modifier.align(Alignment.Center).size(28.dp),
+                color = Accent.Gold,
+                strokeWidth = 2.dp,
+            )
+        }
 
         if (showControls) {
             PlayerControls(
@@ -732,6 +856,44 @@ private fun IconHit(
         )
     }
 }
+
+@Composable
+private fun OverlayButton(text: String, onClick: () -> Unit) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelMedium,
+        color = Color.White,
+        modifier = Modifier
+            .clip(RoundedCornerShape(18.dp))
+            .background(Color(0x33FFFFFF))
+            .border(1.dp, Color(0x4DFFFFFF), RoundedCornerShape(18.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+    )
+}
+
+/** 把 ExoPlayer 的错误码翻成人话，方便判断是源的问题还是地址过期。 */
+private fun describePlaybackError(error: PlaybackException): String = when (error.errorCode) {
+    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT ->
+        "网络连接失败，源站可能已失效"
+    PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ->
+        "源站拒绝访问或地址已过期（防盗链 / 404）"
+    PlaybackException.ERROR_CODE_IO_UNSPECIFIED,
+    PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND ->
+        "播放地址不存在或已过期"
+    PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+    PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED ->
+        "播放地址格式不支持（可能是网页而不是视频流）"
+    PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+    PlaybackException.ERROR_CODE_DECODING_FAILED ->
+        "设备解码失败，换一个源或换一集试试"
+    else -> error.errorCodeName
+}
+
+private const val HTTP_USER_AGENT =
+    "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) " +
+        "Chrome/122.0 Mobile Safari/537.36"
 
 private fun formatSpeed(speed: Float): String =
     if (speed == speed.toInt().toFloat()) speed.toInt().toString() else speed.toString()

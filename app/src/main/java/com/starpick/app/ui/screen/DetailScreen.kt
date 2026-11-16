@@ -217,6 +217,47 @@ fun DetailScreen(
     }
     val episodes = playGroups.getOrNull(lineIndex)?.episodes.orEmpty()
 
+    /**
+     * 用记录里的线路/集号在当前源上开播。
+     *
+     * 记录可能来自另一个源：线路数和集数都可能比当前源多，不收敛就会跳到不存在的集，
+     * 播放器只剩「播放地址无效」。
+     */
+    fun startFromRecord(record: WatchProgress) {
+        val groupIndex = record.groupIndex.coerceIn(0, (playGroups.size - 1).coerceAtLeast(0))
+        val count = playGroups.getOrNull(groupIndex)?.episodes?.size ?: 0
+        val episodeIndex = record.episodeIndex.coerceIn(0, (count - 1).coerceAtLeast(0))
+        lineIndex = groupIndex
+        playing = PlayTarget(resolved, groupIndex, episodeIndex)
+    }
+
+    // 播放失败时重新拉一次详情：采集站的播放地址会过期，重新取往往就好了。
+    val refreshSource: () -> Unit = {
+        val target = playing
+        if (target != null) {
+            scope.launch {
+                val site = sources.firstOrNull { it.id == target.item.sourceId }
+                val fresh = site?.let {
+                    withContext(Dispatchers.IO) {
+                        runCatching { container.api.detail(it, target.item.vodId) }.getOrNull()
+                    }
+                }
+                if (fresh != null) {
+                    items = items.map { if (it.key == fresh.key) fresh else it }
+                    if (selected.key == fresh.key) {
+                        selected = fresh
+                        resolved = fresh
+                    }
+                    val lines = PlaylistParser.parse(fresh.playFrom, fresh.playUrl)
+                    val gi = target.groupIndex.coerceIn(0, (lines.size - 1).coerceAtLeast(0))
+                    val count = lines.getOrNull(gi)?.episodes?.size ?: 0
+                    val ei = target.episodeIndex.coerceIn(0, (count - 1).coerceAtLeast(0))
+                    playing = target.copy(item = fresh, groupIndex = gi, episodeIndex = ei)
+                }
+            }
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -252,6 +293,7 @@ fun DetailScreen(
                             onGroupChange = { g -> playing = playing?.copy(groupIndex = g, episodeIndex = 0) },
                             onEpisodeChange = { e -> playing = playing?.copy(episodeIndex = e) },
                             onExit = onBack,
+                            onRefreshSource = refreshSource,
                             modifier = Modifier.fillMaxSize(),
                         )
                     }
@@ -265,7 +307,7 @@ fun DetailScreen(
                         onPlay = {
                             val record = resumeRecord
                             if (record != null) {
-                                playing = PlayTarget(resolved, record.groupIndex, record.episodeIndex)
+                                startFromRecord(record)
                             } else if (episodes.isNotEmpty()) {
                                 playing = PlayTarget(resolved, lineIndex, 0)
                             }
@@ -344,8 +386,9 @@ fun DetailScreen(
                                 modifier = Modifier.fillMaxWidth(),
                                 enabled = record != null || episodes.isNotEmpty(),
                                 onClick = {
+                                    val record = resumeRecord
                                     if (record != null) {
-                                        playing = PlayTarget(resolved, record.groupIndex, record.episodeIndex)
+                                        startFromRecord(record)
                                     } else if (episodes.isNotEmpty()) {
                                         playing = PlayTarget(resolved, lineIndex, 0)
                                     }
@@ -368,7 +411,14 @@ fun DetailScreen(
                             LineChip(
                                 text = item.sourceName,
                                 selected = item.key == selected.key,
-                                onClick = { selected = item },
+                                onClick = {
+                                    selected = item
+                                    // 播放中换源：立刻切到新源，不然点了没反应，会以为播不出来。
+                                    val active = playing
+                                    if (active != null && active.item.key != item.key) {
+                                        playing = PlayTarget(item, 0, 0)
+                                    }
+                                },
                             )
                         }
                     }

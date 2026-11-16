@@ -8,6 +8,7 @@ import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import coil3.request.crossfade
 import com.starpick.app.core.api.CmsV10Api
 import com.starpick.app.core.api.DoubanApi
+import com.starpick.app.core.api.StreamResolver
 import com.starpick.app.core.search.SearchAggregator
 import com.starpick.app.platform.createHttpClient
 import com.starpick.app.platform.createOkHttpClient
@@ -110,6 +111,9 @@ class AppContainer(context: Context) {
     val api = CmsV10Api(httpClient)
     val douban = DoubanApi(httpClient)
     val aggregator = SearchAggregator(api)
+
+    /** 播放地址探测：把分享页 / 藏了扩展名的 HLS 地址转成播放器能直接吃的形式。 */
+    val streams = StreamResolver(httpClient)
 
     /**
      * GitHub Release 应用内自升级。owner/repository 指向发布 APK 的公开仓库。
