@@ -18,19 +18,17 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Fullscreen
@@ -39,7 +37,6 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
-import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -51,7 +48,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -92,10 +88,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * 播放页：ExoPlayer + 自绘控制层 + 选集抽屉。
+ * 内嵌播放器：只负责「一块视频画面 + 控制层 + 选集抽屉」，不再是独立页面。
  *
- * 为什么关掉 PlayerView 的默认控制器：它的控制条样式亮、按钮密、无法做金色进度，
- * 在深色设计里非常突兀。这里 useController = false，控制条全部自己画。
+ * 由 [DetailScreen] 把它放在详情页顶部（竖屏 16:9、横屏铺满），
+ * 详情信息 / 简介 / 换源 / 线路 / 选集始终在它下方，全程同一个页面。
+ * 尺寸、背景、返回语义全部交给调用方通过 [modifier] 与 [onExit] 决定。
  *
  * 线程纪律（这是之前崩溃过的点）：
  *  - ExoPlayer 的所有读写都在主线程，轮询协程显式切 Dispatchers.Main.immediate。
@@ -103,12 +100,15 @@ import kotlinx.coroutines.withContext
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PlayerScreen(
+fun PlayerSurface(
     container: AppContainer,
     item: VodItem,
     groupIndex: Int,
     episodeIndex: Int,
-    onBack: () -> Unit,
+    onGroupChange: (Int) -> Unit,
+    onEpisodeChange: (Int) -> Unit,
+    onExit: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
@@ -117,32 +117,28 @@ fun PlayerScreen(
         LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
 
     val groups = remember(item) { PlaylistParser.parse(item.playFrom, item.playUrl) }
-
-    var currentGroup by remember(groupIndex) { mutableIntStateOf(groupIndex) }
-    var currentEpisode by remember(currentGroup) { mutableIntStateOf(episodeIndex) }
-
-    val episodes = remember(groups, currentGroup) {
-        groups.getOrNull(currentGroup)?.episodes.orEmpty()
+    val episodes = remember(groups, groupIndex) {
+        groups.getOrNull(groupIndex)?.episodes.orEmpty()
     }
 
-    // 边界保护：集数变化后若 currentEpisode 越界，回退到最后一集。
-    val safeEpisode = currentEpisode.coerceAtMost((episodes.size - 1).coerceAtLeast(0))
+    // 当前集完全由详情页传入，播放器内部不再另存一份，避免两处状态打架。
+    val safeEpisode = episodeIndex.coerceAtMost((episodes.size - 1).coerceAtLeast(0))
     val currentUrl = episodes.getOrNull(safeEpisode)?.url
     val currentName = episodes.getOrNull(safeEpisode)?.name
 
     if (currentUrl.isNullOrBlank() || episodes.isEmpty()) {
         Box(
-            modifier = Modifier.fillMaxSize().background(Color.Black),
+            modifier = modifier.background(Color.Black),
             contentAlignment = Alignment.Center,
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("播放地址无效，返回换一集或换源", color = Color.White)
+                Text("播放地址无效", color = Color.White)
                 Text(
-                    text = "返回",
-                    color = Accent.Brand,
+                    text = "在下方换一集或换源",
+                    color = Accent.Gold,
                     modifier = Modifier
-                        .padding(top = 14.dp)
-                        .clickable(onClick = onBack)
+                        .padding(top = 10.dp)
+                        .clickable(onClick = onExit)
                         .padding(8.dp),
                 )
             }
@@ -171,14 +167,13 @@ fun PlayerScreen(
 
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
-    // 退出全屏 ≠ 退出播放页。横屏时（无论点控制条的返回箭头还是按系统返回键）
-    // 都只把屏幕转回竖屏，留在播放页。
+    // 横屏返回只退全屏（转回竖屏），不离开详情页。
     val exitFullscreen: () -> Unit = {
         activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
     }
 
-    // 这个 BackHandler 比 AppNav 里的那个更晚注册，所以返回事件先落到这里；
-    // 抽屉打开时让给抽屉，返回先关抽屉。
+    // 横屏时本组件独占全屏，它的 BackHandler 注册得比详情页晚，优先响应；
+    // 竖屏时禁用，返回交给详情页处理（直接退出详情，不再多一层"收起播放器"）。
     BackHandler(enabled = isLandscape && !showSheet) { exitFullscreen() }
 
     // 引入时恢复进度（仅当记录属于当前线路 + 当前集）。
@@ -186,7 +181,7 @@ fun PlayerScreen(
         withContext(Dispatchers.Main.immediate) {
             val saved = container.store.progressFor(item.contentKey)
             if (saved != null &&
-                saved.groupIndex == currentGroup &&
+                saved.groupIndex == groupIndex &&
                 saved.episodeIndex == safeEpisode &&
                 saved.positionMs > 0
             ) {
@@ -221,7 +216,7 @@ fun PlayerScreen(
                         cover = item.cover,
                         sourceId = item.sourceId,
                         vodId = item.vodId,
-                        groupIndex = currentGroup,
+                        groupIndex = groupIndex,
                         episodeIndex = safeEpisode,
                         episodeName = currentName ?: "",
                         positionMs = lastPosition,
@@ -242,7 +237,7 @@ fun PlayerScreen(
                 cover = item.cover,
                 sourceId = item.sourceId,
                 vodId = item.vodId,
-                groupIndex = currentGroup,
+                groupIndex = groupIndex,
                 episodeIndex = safeEpisode,
                 episodeName = currentName ?: "",
                 positionMs = lastPosition,
@@ -296,129 +291,89 @@ fun PlayerScreen(
         showControls = true
     }
     val playEpisode: (Int) -> Unit = { index ->
-        currentEpisode = index.coerceIn(0, (episodes.size - 1).coerceAtLeast(0))
+        onEpisodeChange(index.coerceIn(0, (episodes.size - 1).coerceAtLeast(0)))
         showSheet = false
         showControls = true
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black),
-    ) {
-        Column(
-            modifier = if (isLandscape) {
-                Modifier.fillMaxSize()
-            } else {
-                Modifier.fillMaxSize().statusBarsPadding()
-            },
-        ) {
-            Box(
-                modifier = if (isLandscape) {
-                    Modifier.fillMaxSize()
-                } else {
-                    Modifier.fillMaxWidth().aspectRatio(16f / 9f)
-                },
-            ) {
-                AndroidView(
-                    factory = { ctx ->
-                        PlayerView(ctx).apply {
-                            layoutParams = FrameLayout.LayoutParams(
-                                FrameLayout.LayoutParams.MATCH_PARENT,
-                                FrameLayout.LayoutParams.MATCH_PARENT,
-                            )
-                            this.player = player
-                            // 默认控制器样式与深色设计冲突，全部自绘。
-                            useController = false
-                        }
-                    },
-                    update = { it.player = player },
-                    modifier = Modifier.fillMaxSize(),
-                )
-
-                // 整块区域的点击：单击显隐控制条，双击播放 / 暂停。
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .pointerInput(Unit) {
-                            detectTapGestures(
-                                onTap = { showControls = !showControls },
-                                onDoubleTap = { togglePlay() },
-                            )
-                        },
-                )
-
-                if (showControls) {
-                    PlayerControls(
-                        title = item.title,
-                        episodeName = currentName ?: "",
-                        isPlaying = isPlaying,
-                        positionMs = if (scrubbing) (scrubFraction * durationMs.toFloat()).toLong() else positionMs,
-                        durationMs = durationMs,
-                        playbackSpeed = playbackSpeed,
-                        hasPrev = safeEpisode > 0,
-                        hasNext = safeEpisode < episodes.size - 1,
-                        isLandscape = isLandscape,
-                        onBack = { if (isLandscape) exitFullscreen() else onBack() },
-                        onTogglePlay = togglePlay,
-                        onSeekBy = seekBy,
-                        onPrev = { playEpisode(safeEpisode - 1) },
-                        onNext = { playEpisode(safeEpisode + 1) },
-                        onSpeed = {
-                            playbackSpeed = when (playbackSpeed) {
-                                1f -> 1.25f
-                                1.25f -> 1.5f
-                                1.5f -> 2f
-                                else -> 1f
-                            }
-                        },
-                        onEpisodes = { showSheet = true },
-                        onFullscreen = {
-                            activity?.requestedOrientation = if (isLandscape) {
-                                ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-                            } else {
-                                ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                            }
-                        },
-                        scrubbing = scrubbing,
-                        scrubFraction = scrubFraction,
-                        onScrub = {
-                            scrubbing = true
-                            scrubFraction = it
-                            showControls = true
-                        },
-                        onScrubFinished = {
-                            // 时长还没拿到时不 seek，否则会把进度打到 0。
-                            if (durationMs > 0) {
-                                val target = (scrubFraction * durationMs.toFloat()).toLong()
-                                player.seekTo(target)
-                                positionMs = target
-                            }
-                            scrubbing = false
-                        },
+    Box(modifier = modifier.background(Color.Black)) {
+        AndroidView(
+            factory = { ctx ->
+                PlayerView(ctx).apply {
+                    layoutParams = FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT,
                     )
+                    this.player = player
+                    // 默认控制器样式与深色设计冲突，全部自绘。
+                    useController = false
                 }
-            }
+            },
+            update = { it.player = player },
+            modifier = Modifier.fillMaxSize(),
+        )
 
-            if (!isLandscape) {
-                NowPlayingInfo(
-                    modifier = Modifier.weight(1f),
-                    item = item,
-                    episodeName = currentName ?: "",
-                    episodeCount = episodes.size,
-                    lineCount = groups.size,
-                    speed = playbackSpeed,
-                    onEpisodes = { showSheet = true },
-                    onSpeed = {
-                        playbackSpeed = when (playbackSpeed) {
-                            1f -> 1.25f
-                            1.25f -> 1.5f
-                            1.5f -> 2f
-                            else -> 1f
-                        }
-                    },
-                )
-            }
+        // 整块区域的点击：单击显隐控制条，双击播放 / 暂停。
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) {
+                    detectTapGestures(
+                        onTap = { showControls = !showControls },
+                        onDoubleTap = { togglePlay() },
+                    )
+                },
+        )
+
+        if (showControls) {
+            PlayerControls(
+                title = item.title,
+                episodeName = currentName ?: "",
+                isPlaying = isPlaying,
+                positionMs = if (scrubbing) (scrubFraction * durationMs.toFloat()).toLong() else positionMs,
+                durationMs = durationMs,
+                playbackSpeed = playbackSpeed,
+                hasPrev = safeEpisode > 0,
+                hasNext = safeEpisode < episodes.size - 1,
+                isLandscape = isLandscape,
+                onBack = { if (isLandscape) exitFullscreen() else onExit() },
+                onTogglePlay = togglePlay,
+                onSeekBy = seekBy,
+                onPrev = { playEpisode(safeEpisode - 1) },
+                onNext = { playEpisode(safeEpisode + 1) },
+                onSpeed = {
+                    playbackSpeed = when (playbackSpeed) {
+                        1f -> 1.25f
+                        1.25f -> 1.5f
+                        1.5f -> 2f
+                        else -> 1f
+                    }
+                },
+                onEpisodes = { showSheet = true },
+                onFullscreen = {
+                    activity?.requestedOrientation = if (isLandscape) {
+                        ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                    } else {
+                        ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                    }
+                },
+                scrubbing = scrubbing,
+                scrubFraction = scrubFraction,
+                onScrub = {
+                    scrubbing = true
+                    scrubFraction = it
+                    showControls = true
+                },
+                onScrubFinished = {
+                    // 时长还没拿到时不 seek，否则会把进度打到 0。
+                    if (durationMs > 0) {
+                        val target = (scrubFraction * durationMs.toFloat()).toLong()
+                        player.seekTo(target)
+                        positionMs = target
+                    }
+                    scrubbing = false
+                },
+            )
         }
     }
 
@@ -474,11 +429,11 @@ fun PlayerScreen(
                         groups.forEachIndexed { index, group ->
                             LineChip(
                                 text = group.from,
-                                selected = index == currentGroup,
+                                selected = index == groupIndex,
                                 onClick = {
-                                    if (index != currentGroup) {
-                                        currentGroup = index
-                                        currentEpisode = 0
+                                    if (index != groupIndex) {
+                                        onGroupChange(index)
+                                        onEpisodeChange(0)
                                     }
                                 },
                             )
@@ -503,7 +458,7 @@ fun PlayerScreen(
                 }
 
                 Text(
-                    text = "双击屏幕播放 / 暂停，选集不会打断播放",
+                    text = "双击画面播放 / 暂停，选集不打断当前播放",
                     style = MaterialTheme.typography.labelSmall,
                     color = Ink.Text3,
                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
@@ -651,12 +606,7 @@ private fun PlayerControls(
 }
 
 /**
- * 播放进度条。
- *
- * 不用 Material 的 [androidx.compose.material3.Slider]：它自带 20dp 拇指和 4dp 轨道，
- * 在播放器里显得很粗、和深色控制层不搭。这里改成「3dp 细轨 + 9dp 小圆点」，
- * 拖动时轨道变 5dp、圆点放大到 14dp，并直接把目标时间写进下面那行 HH:MM:SS。
- *
+ * 播放进度条：3dp 细轨 + 9dp 小圆点，拖动时加粗放大，金色已播段。
  * 手势自己接：横向拖动改进度，点一下轨道直接跳。
  */
 @Composable
@@ -720,77 +670,6 @@ private fun PlayerSeekBar(
             )
             Box(Modifier.weight((1f - safeFraction).coerceAtLeast(0.0001f)))
         }
-    }
-}
-
-/** 竖屏下方信息区：片名 + 选集 / 倍速入口。 */
-@Composable
-private fun NowPlayingInfo(
-    modifier: Modifier = Modifier,
-    item: VodItem,
-    episodeName: String,
-    episodeCount: Int,
-    lineCount: Int,
-    speed: Float,
-    onEpisodes: () -> Unit,
-    onSpeed: () -> Unit,
-) {
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .verticalScroll(rememberScrollState())
-            .navigationBarsPadding()
-            .padding(horizontal = 20.dp, vertical = 16.dp),
-    ) {
-        Text(
-            text = item.title,
-            style = MaterialTheme.typography.titleLarge,
-            color = Ink.Text1,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Spacer(Modifier.height(6.dp))
-        Text(
-            text = listOfNotNull(
-                episodeName.takeIf { it.isNotBlank() },
-                "共 $episodeCount 集".takeIf { episodeCount > 0 },
-                "$lineCount 条线路".takeIf { lineCount > 1 },
-            ).joinToString(" · "),
-            style = MaterialTheme.typography.labelMedium,
-            color = Ink.Text3,
-        )
-        Spacer(Modifier.height(16.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            PillAction("选集", Icons.Filled.Subtitles, onEpisodes)
-            PillAction("${formatSpeed(speed)}x 倍速", Icons.Filled.PlayArrow, onSpeed)
-        }
-        if (item.description.isNotBlank()) {
-            Spacer(Modifier.height(18.dp))
-            Text(
-                text = item.description.take(120),
-                style = MaterialTheme.typography.bodyMedium,
-                color = Ink.Text2,
-                maxLines = 3,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-    }
-}
-
-@Composable
-private fun PillAction(text: String, icon: androidx.compose.ui.graphics.vector.ImageVector, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(Ink.Card)
-            .border(1.dp, Ink.Line, RoundedCornerShape(10.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 9.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(icon, contentDescription = null, tint = Ink.Text2, modifier = Modifier.size(15.dp))
-        Spacer(Modifier.width(6.dp))
-        Text(text = text, style = MaterialTheme.typography.labelMedium, color = Ink.Text1)
     }
 }
 

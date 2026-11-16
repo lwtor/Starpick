@@ -1,5 +1,6 @@
 package com.starpick.app.ui.screen
 
+import android.content.res.Configuration
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -43,6 +45,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -53,8 +56,8 @@ import coil3.request.crossfade
 import com.starpick.app.AppContainer
 import com.starpick.app.core.model.SearchGroup
 import com.starpick.app.core.model.VodItem
-import com.starpick.app.core.model.contentKeyOf
 import com.starpick.app.core.model.WatchProgress
+import com.starpick.app.core.model.contentKeyOf
 import com.starpick.app.core.parser.PlaylistParser
 import com.starpick.app.ui.component.EmptyState
 import com.starpick.app.ui.component.EpisodeCell
@@ -70,10 +73,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * 详情：海报模糊铺底 + 片名/评分区 + 主 CTA + 来源/线路/选集。
+ * 详情页 = 播放页：同一个页面内完成「看详情 → 点播放 → 切集 → 换源」。
  *
- * 主 CTA 优先写「继续观看 S01E03」而不是「播放」—— 用户要的是接着看，不是从头看。
- * 本页不在 Scaffold 内，状态栏 inset 必须自己加，否则返回键会被状态栏压住。
+ * 播放器不是跳转过去的独立页面，而是内嵌在本页顶部：
+ *  - 未开始播放：顶部是海报头图；
+ *  - 开始播放后：顶部原地切换为 16:9 播放器（横屏自动铺满全屏），
+ *    下面的简介 / 换源 / 线路 / 选集全部保留，随时可见可点。
+ * 返回键：横屏播放中先退全屏，其余情况直接退出本页（不再多一层「收起播放器」）。
  */
 @Composable
 fun DetailScreen(
@@ -84,6 +90,8 @@ fun DetailScreen(
 ) {
     val scope = rememberCoroutineScope()
     val sources by container.store.sources.collectAsState()
+    val isLandscape =
+        LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
 
     // 防御：SearchGroup.items 理论非空，空值时给空态而非崩溃。
     if (group.items.isEmpty()) {
@@ -105,11 +113,12 @@ fun DetailScreen(
     var resumeRecord by remember(group) { mutableStateOf<WatchProgress?>(null) }
     var lineIndex by remember(group) { mutableStateOf(0) }
     var expanded by remember(group) { mutableStateOf(false) }
-    // 播放不再跳转到独立页面：点播放只是在本页把头部切换成播放器。
+    // 播放只是本页顶部的一个状态切换，不动导航栈。
     var playing by remember(group) { mutableStateOf<PlayTarget?>(null) }
 
-    // 竖屏播放时返回先收起播放器；横屏时由播放器自己的 BackHandler 先退全屏。
-    BackHandler(enabled = playing != null) { playing = null }
+    // 横屏播放中：由 PlayerSurface 的 BackHandler 先响应，只退全屏；
+    // 其余情况（含横屏但未播放）直接退出详情页。
+    BackHandler(enabled = !isLandscape || playing == null) { onBack() }
 
     LaunchedEffect(group) {
         val record = initialPlay ?: container.store.progressFor(contentKeyOf(group.title))
@@ -117,16 +126,14 @@ fun DetailScreen(
         val matched = if (record != null && record.sourceId.isNotBlank()) {
             group.items.firstOrNull { it.sourceId == record.sourceId && it.vodId == record.vodId }
         } else null
+        val base = matched ?: group.items.first()
         if (matched != null) selected = matched
-        container.store.rememberItem(matched ?: group.items.first())
+        container.store.rememberItem(base)
         if (initialPlay != null) {
-            val target = matched ?: group.items.first()
-            val count = PlaylistParser.parse(target.playFrom, target.playUrl).size
-            playing = PlayTarget(
-                target,
-                initialPlay.groupIndex.coerceIn(0, (count - 1).coerceAtLeast(0)),
-                initialPlay.episodeIndex,
-            )
+            val count = PlaylistParser.parse(base.playFrom, base.playUrl).size
+            val groupIndex = initialPlay.groupIndex.coerceIn(0, (count - 1).coerceAtLeast(0))
+            lineIndex = groupIndex
+            playing = PlayTarget(base, groupIndex, initialPlay.episodeIndex)
         }
     }
 
@@ -145,6 +152,11 @@ fun DetailScreen(
                 }
             }
             resolved = base
+            // 从「继续观看」直接进播放时，若条目需要补详情，同步把播放器换成补全后的源。
+            val nowPlaying = playing
+            if (nowPlaying != null && nowPlaying.item.key == base.key && nowPlaying.item.playUrl != base.playUrl) {
+                playing = nowPlaying.copy(item = base)
+            }
             val record = container.store.progressFor(base.contentKey)
             resumeRecord = record
             // 同一条记录才恢复线路；源不同时线路编号不通用。
@@ -163,23 +175,28 @@ fun DetailScreen(
     val episodes = playGroups.getOrNull(lineIndex)?.episodes.orEmpty()
 
     val target = playing
-    if (target != null) {
-        PlayerScreen(
-            container = container,
-            item = target.item,
-            groupIndex = target.groupIndex,
-            episodeIndex = target.episodeIndex,
-            // 播放器的返回只收起播放器，回到详情，不再新开/弹出一个页面。
-            onBack = { playing = null },
-        )
-        return
-    }
-
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(bottom = 28.dp),
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(if (isLandscape && target != null) Color.Black else Ink.Base),
     ) {
-        item {
+        // 顶部：未播放时是海报头图，开始播放后原地换成内嵌播放器。
+        if (target != null) {
+            PlayerSurface(
+                container = container,
+                item = target.item,
+                groupIndex = target.groupIndex,
+                episodeIndex = target.episodeIndex,
+                onGroupChange = { g -> playing = playing?.copy(groupIndex = g, episodeIndex = 0) },
+                onEpisodeChange = { e -> playing = playing?.copy(episodeIndex = e) },
+                onExit = onBack,
+                modifier = if (isLandscape) {
+                    Modifier.fillMaxSize()
+                } else {
+                    Modifier.fillMaxWidth().aspectRatio(16f / 9f)
+                },
+            )
+        } else {
             DetailHeader(
                 item = resolved,
                 favorite = favorite,
@@ -193,146 +210,220 @@ fun DetailScreen(
             )
         }
 
-        item {
-            Row(
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically,
+        if (!(isLandscape && target != null)) {
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(bottom = 28.dp),
             ) {
-                val record = resumeRecord
-                val label = when {
-                    record != null -> "继续观看 ${record.episodeName.ifBlank { "上次进度" }}"
-                    episodes.isNotEmpty() -> "播放第 1 集"
-                    else -> "暂无播放地址"
-                }
-                PrimaryButton(
-                    text = label,
-                    icon = Icons.Filled.PlayArrow,
-                    modifier = Modifier.weight(1f),
-                    enabled = record != null || episodes.isNotEmpty(),
-                    onClick = {
-                        if (record != null) {
-                            playing = PlayTarget(resolved, record.groupIndex, record.episodeIndex)
-                        } else if (episodes.isNotEmpty()) {
-                            playing = PlayTarget(resolved, lineIndex, 0)
-                        }
-                    },
-                )
-                SquareIconButton(
-                    icon = if (favorite) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
-                    contentDescription = "收藏",
-                    active = favorite,
-                    onClick = {
-                        scope.launch {
-                            container.store.toggleFavorite(resolved)
-                            favorite = container.store.isFavorite(resolved.key)
-                        }
-                    },
-                )
-            }
-        }
-
-        if (resolved.description.isNotBlank()) {
-            item {
-                Column(Modifier.padding(horizontal = 20.dp)) {
-                    Text(
-                        text = resolved.description.take(300),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = Ink.Text2,
-                        maxLines = if (expanded) Int.MAX_VALUE else 4,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    if (resolved.description.length > 120) {
-                        Text(
-                            text = if (expanded) "收起" else "展开",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = Ink.Text3,
+                // 播放中补一条紧凑片名条，否则顶部换成播放器后看不到片名。
+                if (target != null) {
+                    item {
+                        Row(
                             modifier = Modifier
-                                .padding(top = 6.dp)
-                                .clickable { expanded = !expanded },
-                        )
+                                .fillMaxWidth()
+                                .statusBarsPadding()
+                                .padding(horizontal = 20.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    text = target.item.title,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = Color.White,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                val epName = playGroups
+                                    .getOrNull(target.groupIndex)?.episodes
+                                    ?.getOrNull(target.episodeIndex)?.name
+                                if (!epName.isNullOrBlank()) {
+                                    Text(
+                                        text = "正在播放 · $epName",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Ink.Text3,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
+                            SquareIconButton(
+                                icon = if (favorite) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
+                                contentDescription = "收藏",
+                                active = favorite,
+                                onClick = {
+                                    scope.launch {
+                                        container.store.toggleFavorite(resolved)
+                                        favorite = container.store.isFavorite(resolved.key)
+                                    }
+                                },
+                            )
+                        }
                     }
                 }
-            }
-        }
 
-        // 换源：同一部片在不同源里的集数不同，放在选集之前让人先选源。
-        if (group.items.size > 1) {
-            item { SectionHeader(title = "来源", trailing = "${group.items.size} 个") }
-            item {
-                Row(
-                    modifier = Modifier
-                        .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = 20.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    group.items.forEach { item ->
-                        LineChip(
-                            text = item.sourceName,
-                            selected = item.key == selected.key,
-                            onClick = { selected = item },
-                        )
+                item {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (target != null) {
+                            // 已经在播放：主按钮只提示状态，换集走下方选集区。
+                            PrimaryButton(
+                                text = "播放中 · 在下方选集切换",
+                                icon = Icons.Filled.PlayArrow,
+                                modifier = Modifier.weight(1f),
+                                enabled = false,
+                                onClick = {},
+                            )
+                        } else {
+                            val record = resumeRecord
+                            val label = when {
+                                record != null -> "继续观看 ${record.episodeName.ifBlank { "上次进度" }}"
+                                episodes.isNotEmpty() -> "播放第 1 集"
+                                else -> "暂无播放地址"
+                            }
+                            PrimaryButton(
+                                text = label,
+                                icon = Icons.Filled.PlayArrow,
+                                modifier = Modifier.weight(1f),
+                                enabled = record != null || episodes.isNotEmpty(),
+                                onClick = {
+                                    if (record != null) {
+                                        playing = PlayTarget(resolved, record.groupIndex, record.episodeIndex)
+                                    } else if (episodes.isNotEmpty()) {
+                                        playing = PlayTarget(resolved, lineIndex, 0)
+                                    }
+                                },
+                            )
+                            SquareIconButton(
+                                icon = if (favorite) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
+                                contentDescription = "收藏",
+                                active = favorite,
+                                onClick = {
+                                    scope.launch {
+                                        container.store.toggleFavorite(resolved)
+                                        favorite = container.store.isFavorite(resolved.key)
+                                    }
+                                },
+                            )
+                        }
                     }
                 }
-            }
-        }
 
-        if (playGroups.size > 1) {
-            item { SectionHeader(title = "线路", trailing = "${playGroups.size} 条") }
-            item {
-                Row(
-                    modifier = Modifier
-                        .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = 20.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    playGroups.forEachIndexed { index, playGroup ->
-                        LineChip(
-                            text = playGroup.from,
-                            selected = index == lineIndex,
-                            onClick = { lineIndex = index },
-                        )
+                if (resolved.description.isNotBlank()) {
+                    item {
+                        Column(Modifier.padding(horizontal = 20.dp)) {
+                            Text(
+                                text = resolved.description.take(300),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = Ink.Text2,
+                                maxLines = if (expanded) Int.MAX_VALUE else 4,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            if (resolved.description.length > 120) {
+                                Text(
+                                    text = if (expanded) "收起" else "展开",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = Ink.Text3,
+                                    modifier = Modifier
+                                        .padding(top = 6.dp)
+                                        .clickable { expanded = !expanded },
+                                )
+                            }
+                        }
                     }
                 }
-            }
-        }
 
-        item {
-            SectionHeader(
-                title = "选集",
-                trailing = if (episodes.isEmpty()) null else "共 ${episodes.size} 集",
-            )
-        }
-
-        item {
-            if (episodes.isEmpty()) {
-                Text(
-                    text = "该源没有返回播放地址，可换一个源或检查采集站配置",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Ink.Text2,
-                    modifier = Modifier.padding(horizontal = 20.dp),
-                )
-            } else {
-                val record = resumeRecord
-                FlowPosterGrid(
-                    columns = 5,
-                    itemCount = episodes.size,
-                    modifier = Modifier.padding(horizontal = 20.dp),
-                    horizontalSpacing = 8.dp,
-                    verticalSpacing = 8.dp,
-                ) { index, itemModifier ->
-                    val currentEp = if (record != null && record.groupIndex == lineIndex) {
-                        record.episodeIndex
-                    } else {
-                        -1
+                // 换源：同一部片在不同源里的集数不同，放在选集之前让人先选源。
+                if (group.items.size > 1) {
+                    item { SectionHeader(title = "来源", trailing = "${group.items.size} 个") }
+                    item {
+                        Row(
+                            modifier = Modifier
+                                .horizontalScroll(rememberScrollState())
+                                .padding(horizontal = 20.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            group.items.forEach { item ->
+                                LineChip(
+                                    text = item.sourceName,
+                                    selected = item.key == selected.key,
+                                    onClick = { selected = item },
+                                )
+                            }
+                        }
                     }
-                    EpisodeCell(
-                        label = "${index + 1}",
-                        modifier = itemModifier,
-                        selected = currentEp == index,
-                        seen = currentEp > index,
-                        onClick = { playing = PlayTarget(resolved, lineIndex, index) },
+                }
+
+                if (playGroups.size > 1) {
+                    item { SectionHeader(title = "线路", trailing = "${playGroups.size} 条") }
+                    item {
+                        Row(
+                            modifier = Modifier
+                                .horizontalScroll(rememberScrollState())
+                                .padding(horizontal = 20.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            playGroups.forEachIndexed { index, playGroup ->
+                                LineChip(
+                                    text = playGroup.from,
+                                    selected = index == lineIndex,
+                                    onClick = { lineIndex = index },
+                                )
+                            }
+                        }
+                    }
+                }
+
+                item {
+                    SectionHeader(
+                        title = "选集",
+                        trailing = if (episodes.isEmpty()) null else "共 ${episodes.size} 集",
                     )
+                }
+
+                item {
+                    if (episodes.isEmpty()) {
+                        Text(
+                            text = "该源没有返回播放地址，可换一个源或检查采集站配置",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Ink.Text2,
+                            modifier = Modifier.padding(horizontal = 20.dp),
+                        )
+                    } else {
+                        // 高亮优先级：正在播放的集 > 上次观看记录。
+                        val record = resumeRecord
+                        val activeEpisode = when {
+                            target != null && target.item.key == resolved.key && target.groupIndex == lineIndex ->
+                                target.episodeIndex
+                            record != null && record.groupIndex == lineIndex ->
+                                record.episodeIndex
+                            else -> -1
+                        }
+                        FlowPosterGrid(
+                            columns = 5,
+                            itemCount = episodes.size,
+                            modifier = Modifier.padding(horizontal = 20.dp),
+                            horizontalSpacing = 8.dp,
+                            verticalSpacing = 8.dp,
+                        ) { index, itemModifier ->
+                            EpisodeCell(
+                                label = "${index + 1}",
+                                modifier = itemModifier,
+                                selected = activeEpisode == index,
+                                seen = activeEpisode > index,
+                                onClick = {
+                                    if (target != null && target.item.key == resolved.key) {
+                                        // 已在播放：只切集，播放器原地换片源，不重建页面。
+                                        playing = target.copy(groupIndex = lineIndex, episodeIndex = index)
+                                    } else {
+                                        playing = PlayTarget(resolved, lineIndex, index)
+                                    }
+                                },
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -493,7 +584,7 @@ private fun BackRow(title: String, onBack: () -> Unit) {
     }
 }
 
-/** 当前正在播放的目标：同一页面内切换详情/播放器时不需要动导航栈。 */
+/** 当前播放目标：同一页面内切换详情/播放器时不需要动导航栈。 */
 private data class PlayTarget(
     val item: VodItem,
     val groupIndex: Int,
