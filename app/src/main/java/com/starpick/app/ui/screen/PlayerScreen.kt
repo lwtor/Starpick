@@ -5,6 +5,9 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
+import android.graphics.Matrix
+import android.view.TextureView
+import android.view.View
 import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
@@ -69,6 +72,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
@@ -89,6 +93,7 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
@@ -109,6 +114,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 import java.net.UnknownHostException
 
 /**
@@ -537,12 +543,12 @@ fun PlayerSurface(
                     targetMs = target,
                     modifier = Modifier
                         .padding(bottom = 8.dp)
-                        .width(if (isLandscape) 260.dp else 200.dp)
+                        .width(if (isLandscape) 200.dp else 148.dp)
                         .aspectRatio(16f / 9f)
+                        .shadow(8.dp, RoundedCornerShape(10.dp))
+                        .clip(RoundedCornerShape(10.dp))
                         .background(Color.Black)
-                        // SurfaceView 不吃 Compose 的 clip，做圆角会在四角露出直角画面；
-                        // 索性按 B 站那种直角细边框来。
-                        .border(1.dp, Color(0x4DFFFFFF)),
+                        .border(2.dp, Color(0xA6FFFFFF), RoundedCornerShape(10.dp)),
                 )
                 SwipeSeekHint(
                     deltaMs = swipeDeltaMs,
@@ -1096,6 +1102,9 @@ private fun SwipeFramePreview(
             }
     }
     var broken by remember(player) { mutableStateOf(false) }
+    // 视频原始尺寸：用来算「铺满裁剪」的变换矩阵。
+    var videoWidth by remember(player) { mutableIntStateOf(player.videoSize.width) }
+    var videoHeight by remember(player) { mutableIntStateOf(player.videoSize.height) }
 
     // 目标位置在拖动时每秒变几十次，但每次 seek 都要 flush 解码器：
     // 固定 200ms 取一次「最新值」，既跟得上又不会把解码器冲垮。
@@ -1117,6 +1126,11 @@ private fun SwipeFramePreview(
             override fun onPlayerError(error: PlaybackException) {
                 broken = true
             }
+
+            override fun onVideoSizeChanged(videoSize: VideoSize) {
+                videoWidth = (videoSize.width * videoSize.pixelWidthHeightRatio).roundToInt()
+                videoHeight = videoSize.height
+            }
         }
         player.addListener(listener)
         onDispose {
@@ -1127,20 +1141,37 @@ private fun SwipeFramePreview(
 
     if (broken) return
 
-    AndroidView(
-        factory = { ctx ->
-            PlayerView(ctx).apply {
-                useController = false
-                // 铺满取景框、多出来的部分裁掉：目标帧的构图和正片一致，比留黑边更好认。
-                // 注意 ZOOM 只在视频比例与窗口不同时才有裁剪，比例一致时等同于 FIT。
-                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                setShutterBackgroundColor(android.graphics.Color.BLACK)
-                this.player = player
-            }
-        },
-        update = { it.player = player },
-        modifier = modifier,
-    )
+    // 不用 PlayerView：media3 1.11.1 已经没有 setSurfaceType，默认的 SurfaceView
+    // 既不吃 Compose 的圆角裁剪（四角会露出直角画面），也不会做我们想要的铺满裁剪。
+    // 换成 TextureView + 自己算矩阵，圆角和缩放都完全可控。
+    val textureView = remember(context) { TextureView(context) }
+
+    DisposableEffect(player, textureView) {
+        player.setVideoTextureView(textureView)
+        onDispose { player.clearVideoTextureView(textureView) }
+    }
+
+    // post 里执行，保证 layout 完成、能拿到 view 的真实宽高。
+    // 另外挂 layout 监听：视频尺寸先到、view 后布局的情况（首次显示常见）也要补一次。
+    val latestVideoSize = rememberUpdatedState(videoWidth to videoHeight)
+    DisposableEffect(textureView) {
+        val layoutListener = View.OnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
+            val (w, h) = latestVideoSize.value
+            (v as TextureView).applyCoverCrop(w, h)
+        }
+        textureView.addOnLayoutChangeListener(layoutListener)
+        onDispose { textureView.removeOnLayoutChangeListener(layoutListener) }
+    }
+    LaunchedEffect(textureView, videoWidth, videoHeight) {
+        textureView.post { textureView.applyCoverCrop(videoWidth, videoHeight) }
+    }
+
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        AndroidView(
+            factory = { textureView },
+            modifier = Modifier.fillMaxSize(),
+        )
+    }
 }
 
 /**
@@ -1296,6 +1327,32 @@ private const val MID_FORM_MAX_MS = 70 * 60_000L
 
 private fun formatSpeed(speed: Float): String =
     if (speed == speed.toInt().toFloat()) speed.toInt().toString() else speed.toString()
+
+/**
+ * 铺满裁剪（centerCrop）。
+ *
+ * ExoPlayer 往 TextureView 上是「拉伸填满」，所以先按视频原始宽高比把画面还原，
+ * 再等比放大到同时盖住 view 的宽和高；盖不住的那一侧换成越界，由 view 边界裁掉。
+ *
+ * 因为要抵消一次拉伸，两轴缩放系数一般不同（video 是 4:3、窗口是 16:9 时，
+ * 纵向放大 1.33 倍、横向不变），这不是各向异性拉伸，而是还原成正确的等比画面。
+ */
+private fun TextureView.applyCoverCrop(videoWidth: Int, videoHeight: Int) {
+    if (videoWidth <= 0 || videoHeight <= 0 || width <= 0 || height <= 0) return
+    val viewW = width.toFloat()
+    val viewH = height.toFloat()
+    val cover = maxOf(viewW / videoWidth, viewH / videoHeight)
+    setTransform(
+        Matrix().apply {
+            setScale(
+                videoWidth * cover / viewW,
+                videoHeight * cover / viewH,
+                viewW / 2f,
+                viewH / 2f,
+            )
+        },
+    )
+}
 
 /** 一次轮询拿到的播放器状态快照（必须整体在同一帧主线程读取）。 */
 private data class PlayerSnapshot(
