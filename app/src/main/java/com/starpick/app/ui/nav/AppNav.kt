@@ -51,6 +51,8 @@ import com.starpick.app.ui.screen.ResolvingScreen
 import com.starpick.app.ui.screen.SearchScreen
 import com.starpick.app.ui.screen.SearchUiState
 import com.starpick.app.ui.screen.SettingsScreen
+import com.starpick.app.ui.screen.SourceHealthUiState
+import com.starpick.app.ui.screen.SourceScreen
 import com.starpick.app.ui.theme.Accent
 import com.starpick.app.ui.theme.Ink
 
@@ -63,6 +65,9 @@ sealed interface Screen {
     data object Home : Screen
     data object Search : Screen
     data object Settings : Screen
+
+    /** 内容源管理：设置里的二级页，配一次就不常来，所以不占设置首屏。 */
+    data object Sources : Screen
 
     /** 独立搜索页：只查豆瓣条目，与底部「搜索」（查采集源）分工不同。 */
     data object DiscoverSearch : Screen
@@ -103,6 +108,8 @@ fun StarpickNav(container: AppContainer) {
     val homeState = remember { HomeUiState() }
     val searchState = remember { SearchUiState() }
     val doubanSearchState = remember { DoubanSearchUiState() }
+    // 探活结果跟着导航层活：切到别处再回来还是上次的结论，不会自己又跑一遍。
+    val sourceHealthState = remember { SourceHealthUiState() }
     val current = stack.last()
     val pop: () -> Unit = { if (stack.size > 1) stack.removeLastOrNull() }
     val goTab: (Screen) -> Unit = { tab ->
@@ -157,6 +164,12 @@ fun StarpickNav(container: AppContainer) {
             state = doubanSearchState,
             // 与首页海报同一条路径：拿豆瓣片名去用户的源里解析，命中后直接换成详情页。
             onPick = { title -> stack.add(Screen.Resolving(title)) },
+            onBack = pop,
+        )
+
+        is Screen.Sources -> SourceScreen(
+            container = container,
+            state = sourceHealthState,
             onBack = pop,
         )
 
@@ -224,7 +237,11 @@ fun StarpickNav(container: AppContainer) {
                             onOpenSettings = { goTab(Screen.Settings) },
                         )
 
-                        Screen.Settings -> SettingsScreen(container)
+                        Screen.Settings -> SettingsScreen(
+                            container = container,
+                            health = sourceHealthState,
+                            onOpenSources = { stack.add(Screen.Sources) },
+                        )
                     }
                 }
             }

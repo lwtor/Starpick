@@ -5,7 +5,6 @@ import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -14,32 +13,23 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.CloudDownload
-import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.OpenInBrowser
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -52,52 +42,48 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.draw.scale
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.PathEffect
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.starpick.app.AppContainer
 import com.starpick.app.BuildConfig
 import com.starpick.app.UpdateUiState
 import com.starpick.app.core.api.SourceHealth
-import com.starpick.app.core.model.SourceSite
 import com.starpick.app.ui.component.GhostButton
 import com.starpick.app.ui.component.PrimaryButton
+import com.starpick.app.ui.component.SettingsSectionHeader
+import com.starpick.app.ui.component.StatusPill
+import com.starpick.app.ui.component.WarnColor
+import com.starpick.app.ui.component.formatCacheSize
+import com.starpick.app.ui.component.settingsCard
 import com.starpick.app.ui.theme.Accent
 import com.starpick.app.ui.theme.Ink
 import dev.veneranative.updater.InstallResult
-import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * 设置：内容源 / 播放与存储 / 关于。
+ * 设置：内容源（入口）/ 播放与存储 / 关于。
  *
- * 改版前所有东西塞在一条长列表里：采集源全挤在同一张卡、每个源三行小字和开关并列，
- * 「关于」还兼收版本更新、版本号、仓库、免责声明 —— 读起来是「一团」而不是「三类事」。
- *
- * 现在的结构原则：
- * 1. **一个分区只讲一件事**，分区标题右侧给出该类内容的汇总（几个源在跑 / 缓存占用）；
- * 2. **采集源一个一卡** —— 它是唯一需要逐个体检的对象，合并成行会让状态互相干扰；
- * 3. **读优先于点**：状态用彩色胶囊，操作按钮降到右侧弱色，删除不再常驻红字；
- * 4. 与 Play 无关的信息（仓库、免责）不进主流程，收到最底的「关于」。
+ * 三条原则：
+ * 1. **配一次就不管的东西只留入口**。采集源列表、增删、探活全在二级页（[SourceScreen]），
+ *    首屏只给一行「几个站点、几个可用」；否则设置页一半屏是被几个源长期占着的。
+ * 2. **一个分区只讲一件事**，分区标题右侧给出该类内容的汇总（缓存占用 / 更新状态）。
+ * 3. **读优先于点**：状态用彩色胶囊，操作按钮常驻最右；与播放无关的信息收到最底「关于」。
  */
 @Composable
-fun SettingsScreen(container: AppContainer) {
+fun SettingsScreen(
+    container: AppContainer,
+    health: SourceHealthUiState,
+    onOpenSources: () -> Unit,
+) {
     val sources by container.store.sources.collectAsState()
-    val scope = rememberCoroutineScope()
-    var showAddSheet by remember { mutableStateOf(false) }
     val enabledCount = sources.count { it.enabled }
+    val checkedCount = sources.count { health.health.containsKey(it.id) }
+    val onlineCount = sources.count { health.health[it.id] == SourceHealth.ONLINE }
 
     LazyColumn(
         modifier = Modifier
@@ -107,58 +93,30 @@ fun SettingsScreen(container: AppContainer) {
     ) {
         item { ScreenHeader() }
 
+        item { SettingsSectionHeader(title = "内容源", topPadding = 24.dp) }
         item {
-            SectionHeader(
-                title = "内容源",
-                trailing = if (sources.isEmpty()) null else "$enabledCount / ${sources.size} 已启用",
-                topPadding = 24.dp,
+            SourcesEntryCard(
+                total = sources.size,
+                enabled = enabledCount,
+                checked = checkedCount,
+                online = onlineCount,
+                onClick = onOpenSources,
             )
         }
 
-        if (sources.isEmpty()) {
-            item { EmptySourceCard(onAdd = { showAddSheet = true }) }
-        } else {
-            items(sources, key = { it.id }) { site ->
-                Column {
-                    SourceCard(
-                        site = site,
-                        onToggle = { enabled ->
-                            scope.launch { container.store.setEnabled(site.id, enabled) }
-                        },
-                        onPing = { onResult ->
-                            scope.launch {
-                                val health = withContext(Dispatchers.IO) {
-                                    runCatching { container.api.probe(site) }
-                                        .getOrDefault(SourceHealth.UNKNOWN)
-                                }
-                                onResult(health)
-                            }
-                        },
-                        onRemove = { scope.launch { container.store.remove(site.id) } },
-                    )
-                    Spacer(Modifier.height(8.dp))
-                }
-            }
-            item { AddSourceButton(onClick = { showAddSheet = true }) }
-        }
-
-        item { SectionHeader(title = "播放与存储", topPadding = 26.dp) }
+        item { SettingsSectionHeader(title = "播放与存储", topPadding = 26.dp) }
         item { CacheCard(container) }
 
-        item { SectionHeader(title = "关于", topPadding = 26.dp) }
+        item { SettingsSectionHeader(title = "关于", topPadding = 26.dp) }
         item { UpdatePanel(container) }
         item {
             Spacer(Modifier.height(8.dp))
             AboutPanel()
         }
     }
-
-    if (showAddSheet) {
-        AddSourceSheet(container = container, onDismiss = { showAddSheet = false })
-    }
 }
 
-// ---------------------------------------------------------------- 页头与分区
+// ---------------------------------------------------------------- 页头
 
 @Composable
 private fun ScreenHeader() {
@@ -199,217 +157,67 @@ private fun ScreenHeader() {
     }
 }
 
-/** 分区标题：比正文重、比页头轻，一眼能切出「这是第几类」。 */
-@Composable
-private fun SectionHeader(title: String, trailing: String? = null, topPadding: Dp = 20.dp) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = topPadding, bottom = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = title,
-            style = MaterialTheme.typography.labelLarge.copy(letterSpacing = 0.3.sp),
-            color = Ink.Text2,
-            fontWeight = FontWeight.SemiBold,
-        )
-        if (trailing != null) {
-            Spacer(Modifier.weight(1f))
-            Text(
-                text = trailing,
-                style = MaterialTheme.typography.labelSmall,
-                color = Ink.Text3,
-            )
-        }
-    }
-}
-
-/** 统一卡片外观：16dp 圆角 + 极淡描边，靠明度分层而不是阴影。 */
-private fun Modifier.settingsCard(): Modifier = this
-    .fillMaxWidth()
-    .clip(RoundedCornerShape(16.dp))
-    .background(Ink.Card)
-    .border(1.dp, Ink.Line, RoundedCornerShape(16.dp))
-
-// ---------------------------------------------------------------- 内容源
-
-@Composable
-private fun EmptySourceCard(onAdd: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .settingsCard()
-            .padding(horizontal = 20.dp, vertical = 24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Text(
-            text = "还没有内容源",
-            style = MaterialTheme.typography.titleSmall,
-            color = Ink.Text1,
-        )
-        Spacer(Modifier.height(6.dp))
-        Text(
-            text = "搜索和首页都要靠采集站取数据\n填一个苹果 CMS V10 站点地址就能开始",
-            style = MaterialTheme.typography.labelSmall.copy(lineHeight = 18.sp),
-            color = Ink.Text3,
-            textAlign = TextAlign.Center,
-        )
-        Spacer(Modifier.height(16.dp))
-        PrimaryButton(
-            text = "添加采集源",
-            icon = Icons.Filled.Add,
-            onClick = onAdd,
-        )
-    }
-}
+// ---------------------------------------------------------------- 内容源入口
 
 /**
- * 单个采集源一张卡。
+ * 内容源在首屏只是一行入口：**几个站点、几个已启用、上次检测几个可用**。
  *
- * 三层信息，从上到下逐级减弱：**它是谁**（名称 / 域名）、**它能不能用**（状态胶囊）、
- * **要不要它参与**（开关）。删除退到最右侧的灰色图标，避免和状态抢视线。
+ * 这三样是「我要不要去改配置」的判断依据，看完就够了；至于哪个源挂了、要加要删，
+ * 都属于低频且有破坏性的操作，收进二级页再动。
  */
 @Composable
-private fun SourceCard(
-    site: SourceSite,
-    onToggle: (Boolean) -> Unit,
-    onPing: ((SourceHealth) -> Unit) -> Unit,
-    onRemove: () -> Unit,
+private fun SourcesEntryCard(
+    total: Int,
+    enabled: Int,
+    checked: Int,
+    online: Int,
+    onClick: () -> Unit,
 ) {
-    var health by remember(site.id) { mutableStateOf<SourceHealth?>(null) }
-    var pinging by remember(site.id) { mutableStateOf(false) }
-
-    val ping: () -> Unit = {
-        if (!pinging) {
-            pinging = true
-            onPing { result ->
-                health = result
-                pinging = false
-            }
-        }
-    }
-
-    // 进页面自动测一次：满屏「测试」按钮只会让人更糊涂，先给结论再让人重测。
-    LaunchedEffect(site.id) {
-        if (health == null && !pinging) ping()
-    }
-
-    Column(
-        modifier = Modifier
-            .settingsCard()
-            .padding(start = 16.dp, end = 12.dp, top = 14.dp, bottom = 12.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(
-                    text = site.name,
-                    style = MaterialTheme.typography.titleSmall.copy(fontSize = 15.sp),
-                    color = if (site.enabled) Ink.Text1 else Ink.Text2,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Spacer(Modifier.height(3.dp))
-                Text(
-                    text = site.baseUrl
-                        .removePrefix("https://")
-                        .removePrefix("http://")
-                        .trimEnd('/'),
-                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
-                    color = Ink.Text3,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            Spacer(Modifier.width(10.dp))
-            Switch(
-                checked = site.enabled,
-                onCheckedChange = onToggle,
-                modifier = Modifier.scale(0.88f),
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = Color.White,
-                    checkedTrackColor = Accent.Brand,
-                    uncheckedThumbColor = Ink.Text2,
-                    uncheckedTrackColor = Ink.Selected,
-                    uncheckedBorderColor = Ink.LineStrong,
-                ),
-            )
-        }
-
-        Spacer(Modifier.height(10.dp))
-
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            val (label, color) = when {
-                pinging -> "测试中" to Ink.Text3
-                health == SourceHealth.ONLINE -> "可用" to Accent.Online
-                health == SourceHealth.OFFLINE -> "不可用" to Accent.New
-                health == SourceHealth.UNKNOWN -> "超时未测准" to Accent.Gold
-                else -> "未测试" to Ink.Text3
-            }
-            // 胶囊只负责「显示结论」，重测统一交给右边的文字按钮，避免同一件事两个入口。
-            StatusPill(text = label, color = color)
-            Spacer(Modifier.width(6.dp))
-            Text(
-                text = if (pinging) "…" else "重测",
-                style = MaterialTheme.typography.labelMedium,
-                color = if (pinging) Ink.Text3 else Accent.Brand,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .clickable(enabled = !pinging, onClick = ping)
-                    .padding(horizontal = 8.dp, vertical = 8.dp),
-            )
-            Spacer(Modifier.weight(1f))
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .clickable(onClick = onRemove),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.DeleteOutline,
-                    contentDescription = "删除该源",
-                    tint = Ink.Text3,
-                    modifier = Modifier.size(18.dp),
-                )
-            }
-        }
-    }
-}
-
-/** 空心虚线按钮：和实心卡片区分开，天然读作「新建一项」。 */
-@Composable
-private fun AddSourceButton(onClick: () -> Unit) {
-    val shape = RoundedCornerShape(14.dp)
     Row(
         modifier = Modifier
-            .fillMaxWidth()
-            .height(48.dp)
-            .clip(shape)
-            .drawBehind {
-                drawRoundRect(
-                    color = Ink.LineStrong,
-                    cornerRadius = CornerRadius(14.dp.toPx()),
-                    style = Stroke(
-                        width = 1.dp.toPx(),
-                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 7f)),
-                    ),
-                )
-            }
-            .clickable(onClick = onClick),
-        horizontalArrangement = Arrangement.Center,
+            .settingsCard()
+            .clickable(onClick = onClick)
+            .padding(start = 16.dp, end = 10.dp, top = 14.dp, bottom = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
-            imageVector = Icons.Filled.Add,
+            imageVector = Icons.Filled.Dns,
             contentDescription = null,
-            tint = Accent.Brand,
-            modifier = Modifier.size(17.dp),
+            tint = Ink.Text2,
+            modifier = Modifier.size(18.dp),
         )
-        Spacer(Modifier.width(7.dp))
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = "内容源",
+                style = MaterialTheme.typography.titleSmall.copy(fontSize = 15.sp),
+                color = Ink.Text1,
+            )
+            Spacer(Modifier.height(3.dp))
+            Text(
+                text = when {
+                    total == 0 -> "还没有添加采集站，搜索和首页都要用它"
+                    checked == 0 -> "$enabled 个已启用 · 共 $total 个站点"
+                    else -> "$enabled 个已启用 · 共 $total 个站点 · $online 个可用"
+                },
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+                color = Ink.Text3,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.width(10.dp))
         Text(
-            text = "添加采集源",
-            style = MaterialTheme.typography.labelLarge,
+            text = if (total == 0) "添加" else "管理",
+            style = MaterialTheme.typography.labelMedium,
             color = Accent.Brand,
+        )
+        Spacer(Modifier.width(2.dp))
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = null,
+            tint = Ink.Text3,
+            modifier = Modifier.size(18.dp),
         )
     }
 }
@@ -819,189 +627,6 @@ private fun InfoRow(
                 tint = Ink.Text3,
                 modifier = Modifier.size(14.dp),
             )
-        }
-    }
-}
-
-// ---------------------------------------------------------------- 小组件
-
-/** 状态胶囊：底色是同色 14% 透明，读起来像标签而不是按钮。 */
-@Composable
-private fun StatusPill(
-    text: String,
-    color: Color,
-    onClick: (() -> Unit)? = null,
-) {
-    Row(
-        modifier = Modifier
-            .clip(RoundedCornerShape(7.dp))
-            .background(color.copy(alpha = 0.14f))
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-            .padding(horizontal = 7.dp, vertical = 3.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            modifier = Modifier
-                .size(5.dp)
-                .clip(CircleShape)
-                .background(color),
-        )
-        Spacer(Modifier.width(5.dp))
-        Text(
-            text = text,
-            style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
-            color = color,
-            maxLines = 1,
-        )
-    }
-}
-
-/** 缓存大小按量级取单位，1 GB 上限显示成「1.0 GB」比「1024 MB」好读。 */
-private fun formatCacheSize(bytes: Long): String = when {
-    bytes >= 3L * 1024 * 1024 * 1024 -> "%.1f GB".format(bytes / 1024.0 / 1024.0 / 1024.0)
-    bytes >= 1024L * 1024 * 1024 -> "%.2f GB".format(bytes / 1024.0 / 1024.0 / 1024.0)
-    else -> "%.0f MB".format(bytes / 1024.0 / 1024.0)
-}
-
-private val WarnColor = Color(0xFFFF6B6B)
-
-/** 添加采集源：底部弹层，只填域名，路径自动补全。 */
-@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
-@Composable
-private fun AddSourceSheet(container: AppContainer, onDismiss: () -> Unit) {
-    val scope = rememberCoroutineScope()
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var name by remember { mutableStateOf("") }
-    var url by remember { mutableStateOf("") }
-    var testing by remember { mutableStateOf(false) }
-    var testResult by remember { mutableStateOf<String?>(null) }
-    var saving by remember { mutableStateOf(false) }
-
-    val fieldColors = OutlinedTextFieldDefaults.colors(
-        focusedTextColor = Ink.Text1,
-        unfocusedTextColor = Ink.Text1,
-        focusedBorderColor = Accent.Brand,
-        unfocusedBorderColor = Ink.LineStrong,
-        focusedContainerColor = Ink.Card,
-        unfocusedContainerColor = Ink.Card,
-        focusedLabelColor = Accent.Brand,
-        unfocusedLabelColor = Ink.Text3,
-        cursorColor = Accent.Brand,
-    )
-
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = Ink.Raised,
-        contentColor = Ink.Text1,
-        dragHandle = {
-            Box(
-                modifier = Modifier
-                    .padding(top = 10.dp, bottom = 6.dp)
-                    .size(width = 36.dp, height = 4.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(Color(0x38FFFFFF)),
-            )
-        },
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(horizontal = 20.dp)
-                .padding(bottom = 22.dp),
-        ) {
-            Text(
-                text = "添加采集源",
-                style = MaterialTheme.typography.titleLarge,
-                color = Ink.Text1,
-            )
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = "填写苹果 CMS V10 站点地址，应用不内置任何采集站。",
-                style = MaterialTheme.typography.labelMedium,
-                color = Ink.Text3,
-            )
-            Spacer(Modifier.height(18.dp))
-            OutlinedTextField(
-                value = name,
-                onValueChange = { name = it },
-                label = { Text("名称（可留空）") },
-                singleLine = true,
-                shape = RoundedCornerShape(12.dp),
-                colors = fieldColors,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(Modifier.height(10.dp))
-            OutlinedTextField(
-                value = url,
-                onValueChange = {
-                    url = it
-                    testResult = null
-                },
-                label = { Text("站点地址") },
-                placeholder = { Text("https://example.com", color = Ink.Text3) },
-                singleLine = true,
-                shape = RoundedCornerShape(12.dp),
-                colors = fieldColors,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = "只需填域名，App 会自动请求 /api.php/provide/vod/",
-                style = MaterialTheme.typography.labelSmall,
-                color = Ink.Text3,
-            )
-
-            testResult?.let { result ->
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    text = result,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = if (result.startsWith("连接正常")) Accent.Online else Accent.New,
-                )
-            }
-
-            Spacer(Modifier.height(18.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                GhostButton(
-                    text = if (testing) "测试中…" else "测试连接",
-                    modifier = Modifier.weight(1f),
-                    enabled = !testing && url.isNotBlank(),
-                ) {
-                    testing = true
-                    testResult = null
-                    scope.launch {
-                        val site = SourceSite(
-                            id = UUID.randomUUID().toString(),
-                            name = name.ifBlank { "未命名源" },
-                            baseUrl = url.trim(),
-                        )
-                        val health = withContext(Dispatchers.IO) {
-                            runCatching { container.api.probe(site) }
-                                .getOrDefault(SourceHealth.UNKNOWN)
-                        }
-                        testResult = when (health) {
-                            SourceHealth.ONLINE -> "连接正常，可以保存"
-                            SourceHealth.OFFLINE -> "连不上，检查地址或网络"
-                            SourceHealth.UNKNOWN -> "网络超时没测通，可以先保存，之后在列表里重测"
-                        }
-                        testing = false
-                    }
-                }
-                PrimaryButton(
-                    text = if (saving) "保存中…" else "保存并启用",
-                    modifier = Modifier.weight(1f),
-                    enabled = !saving && url.isNotBlank(),
-                ) {
-                    saving = true
-                    scope.launch {
-                        container.store.add(name.ifBlank { "未命名源" }, url)
-                        saving = false
-                        onDismiss()
-                    }
-                }
-            }
         }
     }
 }
