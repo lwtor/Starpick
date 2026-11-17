@@ -38,6 +38,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -202,6 +203,32 @@ class AppContainer(context: Context) {
 
     /** 播放列表/分片 URL 对应的缓存 key，给进度条查询「这一段是否已落盘」用。 */
     fun cacheKeyForUrl(url: String): String = Companion.cacheKeyOf(url)
+
+    /**
+     * 主动把一个分片下载进磁盘缓存（当前分片前后各两片预加载用）。
+     *
+     * 复用播放器那条带缓存的 DataSource：把分片完整读一遍丢掉，SimpleCache 顺带落盘，
+     * 之后播放或拖动到这一段就直接命中缓存。已落盘的跳过，不重复下载。
+     * 取消时立即停，没读完的临时文件不会提交成有效 span，不会污染进度条。
+     */
+    suspend fun prefetchSegment(url: String): Boolean = withContext(Dispatchers.IO) {
+        if (!isActive) return@withContext false
+        val key = cacheKeyForUrl(url)
+        if (mediaCache.getCachedSpans(key).isNotEmpty()) return@withContext false
+        val source = cachedDataSourceFactory.createDataSource()
+        try {
+            source.open(DataSpec.Builder().setUri(url).build())
+            val buffer = ByteArray(64 * 1024)
+            // 只读不存：目的就是让 CacheDataSource 把字节写进 SimpleCache。
+            while (isActive && source.read(buffer, 0, buffer.size) != -1) { /* discard */ }
+            isActive
+        } catch (t: Throwable) {
+            // 单个分片失败（404 / 超时 / 断流）不能影响播放，也不能中断后面的预加载。
+            false
+        } finally {
+            runCatching { source.close() }
+        }
+    }
 
     /** 清空播放缓存，返回释放的字节数。内部已切 IO，调用方直接 await 即可。 */
     suspend fun clearMediaCache(): Long = withContext(Dispatchers.IO) {

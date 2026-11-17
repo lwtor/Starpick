@@ -114,7 +114,10 @@ import com.starpick.app.ui.component.formatPosition
 import com.starpick.app.ui.theme.Accent
 import com.starpick.app.ui.theme.Ink
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -345,6 +348,9 @@ fun PlayerSurface(
     // 500ms 轮询：刷新 UI 状态；每 5 秒落一次盘。
     LaunchedEffect(player) {
         var tick = 0
+        // 只在「当前分片」变化时触发预加载；新位置会取消上一批还没下完的任务。
+        var prefetchJob: Job? = null
+        var lastSegment = -1
         while (isActive) {
             delay(500)
             val snapshot = withContext(Dispatchers.Main.immediate) {
@@ -360,9 +366,21 @@ fun PlayerSurface(
             durationMs = snapshot.duration
             isPlaying = snapshot.playing
             bufferedMs = snapshot.buffered
-            cachedRanges = (snapshot.manifest as? HlsManifest)?.let {
-                hlsCachedRanges(it, container, snapshot.duration)
-            } ?: emptyList()
+            val hls = snapshot.manifest as? HlsManifest
+            cachedRanges = hls?.let { hlsCachedRanges(it, container, snapshot.duration) }
+                ?: emptyList()
+            // 播放推进到新分片后，提前把前后各两个下进磁盘缓存；拖动中不预加载，
+            // 免得用户连续 seek 时反复起任务、抢正在播的那片的带宽。
+            if (hls != null && !scrubbing) {
+                val index = currentSegmentIndex(hls, snapshot.position)
+                if (index >= 0 && index != lastSegment) {
+                    lastSegment = index
+                    prefetchJob?.cancel()
+                    prefetchJob = launch(Dispatchers.IO) {
+                        prefetchAround(hls, index, container)
+                    }
+                }
+            }
             lastPosition = snapshot.position
             lastDuration = snapshot.duration
             if (++tick % 10 == 0) {
@@ -1376,6 +1394,46 @@ private data class PlayerSnapshot(
 
 /** 进度条上的一段已落盘区间，0f~1f 相对整集时长。 */
 private data class CachedRange(val start: Float, val end: Float)
+
+/**
+ * 当前播放位置落在播放列表的第几个分片上。
+ * 以首片的 relativeStartTimeUs 为原点，兼容源站只返回一段滑动窗口的列表。
+ */
+private fun currentSegmentIndex(manifest: HlsManifest, positionMs: Long): Int {
+    val segments = manifest.mediaPlaylist.segments
+    if (segments.isEmpty() || positionMs < 0) return -1
+    val atUs = segments.first().relativeStartTimeUs + positionMs * 1000L
+    for (i in segments.indices) {
+        val segment = segments[i]
+        if (atUs >= segment.relativeStartTimeUs &&
+            atUs < segment.relativeStartTimeUs + segment.durationUs
+        ) return i
+    }
+    // 落在列表之外（首片之前 / 尾部之后）时贴住最近的一端。
+    return if (atUs < segments.first().relativeStartTimeUs) 0 else segments.lastIndex
+}
+
+/**
+ * 当前分片前后各两个分片预加载：先下即将播放的，再补回看方向的。
+ * 串行下载，不和正在播的分片抢带宽；已缓存的分片由容器直接跳过。
+ */
+private suspend fun prefetchAround(
+    manifest: HlsManifest,
+    index: Int,
+    container: AppContainer,
+) {
+    val playlist = manifest.mediaPlaylist
+    val segments = playlist.segments
+    for (i in listOf(index + 1, index + 2, index - 1, index - 2)) {
+        currentCoroutineContext().ensureActive()
+        if (i !in segments.indices) continue
+        val segment = segments[i]
+        if (segment.url.isBlank()) continue
+        val url = runCatching { java.net.URI(playlist.baseUri).resolve(segment.url).toString() }
+            .getOrDefault(segment.url)
+        container.prefetchSegment(url)
+    }
+}
 
 /**
  * 把 HLS 媒体播放列表里的分片映射到时间轴，只留下磁盘上真有数据的分片。
