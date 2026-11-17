@@ -267,7 +267,7 @@ fun PlayerSurface(
     // 硬跳过去会落到一个不存在的时长上（表现为一进去就卡住/黑屏）。
     LaunchedEffect(player, item.key) {
         withContext(Dispatchers.Main.immediate) {
-            val saved = container.store.progressFor(item.contentKey)
+            val saved = container.store.progressFor(item.historyKey)
             if (saved != null &&
                 saved.sourceId == item.sourceId &&
                 saved.vodId == item.vodId &&
@@ -358,7 +358,7 @@ fun PlayerSurface(
             if (++tick % 10 == 0) {
                 container.store.saveProgress(
                     WatchProgress(
-                        key = item.contentKey,
+                        key = item.historyKey,
                         title = item.title,
                         cover = item.cover,
                         sourceId = item.sourceId,
@@ -379,7 +379,7 @@ fun PlayerSurface(
     DisposableEffect(player) {
         onDispose {
             val record = WatchProgress(
-                key = item.contentKey,
+                key = item.historyKey,
                 title = item.title,
                 cover = item.cover,
                 sourceId = item.sourceId,

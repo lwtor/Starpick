@@ -504,7 +504,7 @@ private fun ContinueWatchingRow(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             items(progress, key = { it.key }) { record ->
-                val item = recent.firstOrNull { it.contentKey == record.key }
+                val item = recent.firstOrNull { it.historyKey == record.key }
                 ContinueCard(
                     record = record,
                     enabled = item != null,

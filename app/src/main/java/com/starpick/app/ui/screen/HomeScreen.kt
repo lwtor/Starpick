@@ -176,7 +176,7 @@ fun HomeScreen(
                     }
                 } else {
                     items(progress, key = { it.key }) { record ->
-                        val item = recent.firstOrNull { it.contentKey == record.key }
+                        val item = recent.firstOrNull { it.historyKey == record.key }
                         val fraction = if (record.durationMs > 0) {
                             (record.positionMs.toFloat() / record.durationMs).coerceIn(0f, 1f)
                         } else {

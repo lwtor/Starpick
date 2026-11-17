@@ -3,7 +3,7 @@ package com.starpick.app.platform.storage
 import android.content.Context
 import com.starpick.app.core.model.SourceSite
 import com.starpick.app.core.model.VodItem
-import com.starpick.app.core.model.contentKeyOf
+import com.starpick.app.core.model.historyKeyOf
 import com.starpick.app.core.model.WatchProgress
 import com.starpick.app.core.repository.LibraryRepository
 import com.starpick.app.core.repository.SourceRepository
@@ -93,21 +93,28 @@ class StarpickStore(context: Context) : SourceRepository, LibraryRepository {
     suspend fun rememberItem(item: VodItem) = mutate { snapshot ->
         snapshot.copy(
             recent = (
-                listOf(item) + snapshot.recent.filterNot { it.contentKey == item.contentKey }
+                listOf(item) + snapshot.recent.filterNot { it.historyKey == item.historyKey }
                 ).take(RECENT_LIMIT),
         )
     }
 
     fun itemFor(key: String): VodItem? =
-        state.value.recent.firstOrNull { it.contentKey == key }
+        state.value.recent.firstOrNull { it.historyKey == key }
 
     override suspend fun progressFor(key: String): WatchProgress? =
         state.value.progress.firstOrNull { it.key == key }
 
     override suspend fun saveProgress(record: WatchProgress) = mutate { snapshot ->
+        // 键在写入侧再算一次：即使调用方拿了旧键（源:片 id、只去空白的片名），
+        // 同一部剧也只会有一行，不靠列表层二次合并。
+        val normalized = if (record.key == historyKeyOf(record.title)) {
+            record
+        } else {
+            record.copy(key = historyKeyOf(record.title))
+        }
         snapshot.copy(
             // 最新在前：UI 的「继续观看」直接取前面几条，不排序会拿到最旧的记录。
-            progress = (snapshot.progress.filterNot { it.key == record.key } + record)
+            progress = (snapshot.progress.filterNot { it.key == normalized.key } + normalized)
                 .sortedByDescending { it.updatedAt },
         )
     }
@@ -179,19 +186,20 @@ class StarpickStore(context: Context) : SourceRepository, LibraryRepository {
     private fun JsonObject.toState(): State = State(
         sources = array("sources").mapNotNull { (it as? JsonObject)?.toSourceSite() },
         favorites = array("favorites").mapNotNull { (it as? JsonObject)?.toVodItem() },
-        // 老版本把 key 存成 sourceId:vodId，同一部剧的每个源各一条。
-        // 加载时统一折算成内容 key 并按最新一条去重，用户不需要手动清理旧记录。
+        // 老版本把 key 存成 sourceId:vodId，后来又只归一空白/标点，
+        // 于是换源、换线路、片名带集数后缀都会多出一条。加载时统一折算成宽松内容键，
+        // 只留最新一条 —— 老用户不用手动清理历史。
         progress = array("progress")
             .mapNotNull { (it as? JsonObject)?.toProgress() }
             .filter { it.title.isNotBlank() }
-            .map { it.copy(key = contentKeyOf(it.title)) }
+            .map { it.copy(key = historyKeyOf(it.title)) }
             .groupBy { it.key }
             .values.mapNotNull { group -> group.maxByOrNull { it.updatedAt } }
             .sortedByDescending { it.updatedAt },
         // recent 同样可能被不同源的片名写法拆成多条，按内容 key 去重并保留靠前的（最新）。
         recent = array("recent")
             .mapNotNull { (it as? JsonObject)?.toVodItem() }
-            .distinctBy { it.contentKey }
+            .distinctBy { it.historyKey }
             .take(RECENT_LIMIT),
         searchHistory = array("searchHistory")
             .mapNotNull { (it as? JsonPrimitive)?.content?.takeIf(String::isNotBlank) }

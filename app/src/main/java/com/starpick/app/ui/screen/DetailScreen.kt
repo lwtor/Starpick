@@ -62,7 +62,7 @@ import com.starpick.app.core.model.DoubanDetail
 import com.starpick.app.core.model.SearchGroup
 import com.starpick.app.core.model.VodItem
 import com.starpick.app.core.model.WatchProgress
-import com.starpick.app.core.model.contentKeyOf
+import com.starpick.app.core.model.historyKeyOf
 import com.starpick.app.core.parser.PlaylistParser
 import com.starpick.app.ui.component.EmptyState
 import com.starpick.app.ui.component.EpisodeCell
@@ -144,7 +144,7 @@ fun DetailScreen(
     }
 
     LaunchedEffect(group) {
-        val record = initialPlay ?: container.store.progressFor(contentKeyOf(group.title))
+        val record = initialPlay ?: container.store.progressFor(historyKeyOf(group.title))
         // 按最后一次播放记录自动切回当时的源，而不是永远用搜索结果的第一个。
         val matched = if (record != null && record.sourceId.isNotBlank()) {
             group.items.firstOrNull { it.sourceId == record.sourceId && it.vodId == record.vodId }
@@ -205,7 +205,7 @@ fun DetailScreen(
             if (nowPlaying != null && nowPlaying.item.key == base.key && nowPlaying.item.playUrl != base.playUrl) {
                 playing = nowPlaying.copy(item = base)
             }
-            val record = container.store.progressFor(base.contentKey)
+            val record = container.store.progressFor(base.historyKey)
             resumeRecord = record
             val lines = PlaylistParser.parse(base.playFrom, base.playUrl)
             val preferred = PlaylistParser.preferredGroupIndex(lines)
@@ -435,12 +435,9 @@ fun DetailScreen(
                                 text = item.sourceName,
                                 selected = item.key == selected.key,
                                 onClick = {
+                                    // 点源只做「选中」：更新线路 / 选集列表，不打断当前播放。
+                                    // 真正切源发生在点某一集时，避免误碰一次源就把正在看的进度丢掉。
                                     selected = item
-                                    // 播放中换源：立刻切到新源，不然点了没反应，会以为播不出来。
-                                    val active = playing
-                                    if (active != null && active.item.key != item.key) {
-                                        playing = PlayTarget(item, 0, 0)
-                                    }
                                 },
                             )
                         }
@@ -463,10 +460,8 @@ fun DetailScreen(
                                     text = playGroup.from,
                                     selected = index == lineIndex,
                                     onClick = {
+                                        // 线路同视频源：只切换选集列表，点集才切播放地址。
                                         lineIndex = index
-                                        // 正在播放时切线路必须真的换播放地址，
-                                        // 否则点了没反应，看起来像是这条线路不能用。
-                                        playing = playing?.copy(groupIndex = index)
                                     },
                                 )
                             }
