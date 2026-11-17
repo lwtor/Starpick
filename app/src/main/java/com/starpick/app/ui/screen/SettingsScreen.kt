@@ -1,12 +1,13 @@
 package com.starpick.app.ui.screen
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -19,13 +20,13 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.DeleteOutline
-import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.OpenInBrowser
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.CircularProgressIndicator
@@ -51,10 +52,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.starpick.app.AppContainer
 import com.starpick.app.BuildConfig
 import com.starpick.app.UpdateUiState
@@ -65,241 +75,203 @@ import com.starpick.app.ui.component.PrimaryButton
 import com.starpick.app.ui.theme.Accent
 import com.starpick.app.ui.theme.Ink
 import dev.veneranative.updater.InstallResult
-import dev.veneranative.updater.UpdateCheck
-import dev.veneranative.updater.UpdateStatus
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * 设置：采集源管理 + 版本更新。
+ * 设置：内容源 / 播放与存储 / 关于。
  *
- * 分组卡片 + 行式布局：每行 56dp，右侧只放开关或「值 + 箭头」，
- * 采集源的可视化落到三个信号：状态点（能否连通）、延迟（快不快）、开关（参不参与聚合）。
+ * 改版前所有东西塞在一条长列表里：采集源全挤在同一张卡、每个源三行小字和开关并列，
+ * 「关于」还兼收版本更新、版本号、仓库、免责声明 —— 读起来是「一团」而不是「三类事」。
+ *
+ * 现在的结构原则：
+ * 1. **一个分区只讲一件事**，分区标题右侧给出该类内容的汇总（几个源在跑 / 缓存占用）；
+ * 2. **采集源一个一卡** —— 它是唯一需要逐个体检的对象，合并成行会让状态互相干扰；
+ * 3. **读优先于点**：状态用彩色胶囊，操作按钮降到右侧弱色，删除不再常驻红字；
+ * 4. 与 Play 无关的信息（仓库、免责）不进主流程，收到最底的「关于」。
  */
 @Composable
 fun SettingsScreen(container: AppContainer) {
     val sources by container.store.sources.collectAsState()
     val scope = rememberCoroutineScope()
     var showAddSheet by remember { mutableStateOf(false) }
+    val enabledCount = sources.count { it.enabled }
 
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding(),
-        contentPadding = PaddingValues(bottom = 28.dp),
+        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 28.dp),
     ) {
+        item { ScreenHeader() }
+
         item {
-            Text(
-                text = "设置",
-                style = MaterialTheme.typography.headlineSmall,
-                color = Ink.Text1,
-                modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 14.dp),
+            SectionHeader(
+                title = "内容源",
+                trailing = if (sources.isEmpty()) null else "$enabledCount / ${sources.size} 已启用",
+                topPadding = 24.dp,
             )
         }
 
-        item {
-            GroupCard(
-                title = if (sources.isEmpty()) "采集源" else "采集源 · ${sources.count { it.enabled }} 个已启用",
-            ) {
-                if (sources.isEmpty()) {
-                    RowItem(
-                        title = "还没有源",
-                        subtitle = "搜索和首页都需要至少一个采集站",
-                        first = true,
-                        showChevron = false,
-                    )
-                } else {
-                    sources.forEachIndexed { index, site ->
-                        SourceRow(
-                            site = site,
-                            first = index == 0,
-                            onToggle = { enabled ->
-                                scope.launch { container.store.setEnabled(site.id, enabled) }
-                            },
-                            onPing = { onResult ->
-                                scope.launch {
-                                    val health = withContext(Dispatchers.IO) {
-                                        runCatching { container.api.probe(site) }
-                                            .getOrDefault(SourceHealth.UNKNOWN)
-                                    }
-                                    onResult(health)
+        if (sources.isEmpty()) {
+            item { EmptySourceCard(onAdd = { showAddSheet = true }) }
+        } else {
+            items(sources, key = { it.id }) { site ->
+                Column {
+                    SourceCard(
+                        site = site,
+                        onToggle = { enabled ->
+                            scope.launch { container.store.setEnabled(site.id, enabled) }
+                        },
+                        onPing = { onResult ->
+                            scope.launch {
+                                val health = withContext(Dispatchers.IO) {
+                                    runCatching { container.api.probe(site) }
+                                        .getOrDefault(SourceHealth.UNKNOWN)
                                 }
-                            },
-                            onRemove = { scope.launch { container.store.remove(site.id) } },
-                        )
-                    }
+                                onResult(health)
+                            }
+                        },
+                        onRemove = { scope.launch { container.store.remove(site.id) } },
+                    )
+                    Spacer(Modifier.height(8.dp))
                 }
-                RowItem(
-                    title = "添加采集源",
-                    first = false,
-                    showChevron = false,
-                    titleColor = Accent.Brand,
-                    leading = {
-                        Icon(
-                            imageVector = Icons.Filled.Add,
-                            contentDescription = null,
-                            tint = Accent.Brand,
-                            modifier = Modifier.size(18.dp),
-                        )
-                    },
-                    onClick = { showAddSheet = true },
-                )
             }
+            item { AddSourceButton(onClick = { showAddSheet = true }) }
         }
 
-        item {
-            GroupCard(title = "播放缓存") {
-                MediaCacheRow(container)
-            }
-        }
+        item { SectionHeader(title = "播放与存储", topPadding = 26.dp) }
+        item { CacheCard(container) }
 
+        item { SectionHeader(title = "关于", topPadding = 26.dp) }
+        item { UpdatePanel(container) }
         item {
-            GroupCard(title = "关于") {
-                VersionRow(container)
-                RowItem(
-                    title = "应用版本",
-                    first = false,
-                    showChevron = false,
-                    trailing = {
-                        Column(horizontalAlignment = Alignment.End) {
-                            Text(
-                                text = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = Ink.Text3,
-                            )
-                            // 打包时间：判断「手上这个包是不是最新」的唯一可靠依据。
-                            Text(
-                                text = "打包于 ${BuildConfig.BUILD_TIME}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Ink.Text3,
-                            )
-                        }
-                    },
-                )
-                RowItem(
-                    title = "开源仓库",
-                    first = false,
-                    trailing = {
-                        Text(
-                            text = "GitHub",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = Ink.Text3,
-                        )
-                    },
-                )
-                Text(
-                    text = "星匣不内置、不预置任何影视内容，播放源由用户自行配置。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Ink.Text3,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-                )
-            }
+            Spacer(Modifier.height(8.dp))
+            AboutPanel()
         }
     }
 
     if (showAddSheet) {
-        AddSourceSheet(
-            container = container,
-            onDismiss = { showAddSheet = false },
-        )
+        AddSourceSheet(container = container, onDismiss = { showAddSheet = false })
     }
 }
 
-// ---------------------------------------------------------------- 结构件
+// ---------------------------------------------------------------- 页头与分区
 
 @Composable
-private fun GroupCard(title: String, content: @Composable ColumnScope.() -> Unit) {
-    Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)) {
-        Text(
-            text = title,
-            style = MaterialTheme.typography.labelSmall,
-            color = Ink.Text3,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(start = 4.dp, bottom = 8.dp),
-        )
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(14.dp))
-                .background(Ink.Card)
-                .border(1.dp, Ink.Line, RoundedCornerShape(14.dp)),
-            content = content,
-        )
-    }
-}
-
-@Composable
-private fun RowItem(
-    title: String,
-    subtitle: String? = null,
-    first: Boolean = false,
-    showChevron: Boolean = true,
-    titleColor: androidx.compose.ui.graphics.Color = Ink.Text1,
-    leading: @Composable (() -> Unit)? = null,
-    trailing: @Composable (() -> Unit)? = null,
-    onClick: (() -> Unit)? = null,
-) {
-    Column {
-        if (!first) {
-            HorizontalDivider(
-                modifier = Modifier.padding(start = if (leading == null) 16.dp else 46.dp),
-                thickness = 1.dp,
-                color = Ink.Line,
+private fun ScreenHeader() {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 2.dp),
+        verticalAlignment = Alignment.Bottom,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = "设置",
+                style = MaterialTheme.typography.headlineSmall,
+                color = Ink.Text1,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = "配置只保存在本机，不上传任何服务器",
+                style = MaterialTheme.typography.labelSmall,
+                color = Ink.Text3,
             )
         }
-        Row(
+        Spacer(Modifier.width(12.dp))
+        // 版本放页头：用户找不到版本时第一眼就在这，不用往下翻。
+        Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .then(
-                    if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier,
-                )
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
+                .clip(RoundedCornerShape(8.dp))
+                .background(Ink.Card)
+                .border(1.dp, Ink.Line, RoundedCornerShape(8.dp))
+                .padding(horizontal = 9.dp, vertical = 5.dp),
         ) {
-            if (leading != null) {
-                leading()
-                Spacer(Modifier.width(12.dp))
-            }
-            Column(Modifier.weight(1f)) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = titleColor,
-                )
-                if (subtitle != null) {
-                    Spacer(Modifier.height(2.dp))
-                    Text(
-                        text = subtitle,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Ink.Text3,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-            if (trailing != null) {
-                Spacer(Modifier.width(10.dp))
-                trailing()
-            }
-            if (showChevron) {
-                Spacer(Modifier.width(6.dp))
-                Icon(
-                    imageVector = Icons.Filled.ChevronRight,
-                    contentDescription = null,
-                    tint = Ink.Text3,
-                    modifier = Modifier.size(16.dp),
-                )
-            }
+            Text(
+                text = "v${BuildConfig.VERSION_NAME}",
+                style = MaterialTheme.typography.labelSmall,
+                color = Ink.Text2,
+            )
         }
     }
 }
 
+/** 分区标题：比正文重、比页头轻，一眼能切出「这是第几类」。 */
 @Composable
-private fun SourceRow(
+private fun SectionHeader(title: String, trailing: String? = null, topPadding: Dp = 20.dp) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = topPadding, bottom = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.labelLarge.copy(letterSpacing = 0.3.sp),
+            color = Ink.Text2,
+            fontWeight = FontWeight.SemiBold,
+        )
+        if (trailing != null) {
+            Spacer(Modifier.weight(1f))
+            Text(
+                text = trailing,
+                style = MaterialTheme.typography.labelSmall,
+                color = Ink.Text3,
+            )
+        }
+    }
+}
+
+/** 统一卡片外观：16dp 圆角 + 极淡描边，靠明度分层而不是阴影。 */
+private fun Modifier.settingsCard(): Modifier = this
+    .fillMaxWidth()
+    .clip(RoundedCornerShape(16.dp))
+    .background(Ink.Card)
+    .border(1.dp, Ink.Line, RoundedCornerShape(16.dp))
+
+// ---------------------------------------------------------------- 内容源
+
+@Composable
+private fun EmptySourceCard(onAdd: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .settingsCard()
+            .padding(horizontal = 20.dp, vertical = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            text = "还没有内容源",
+            style = MaterialTheme.typography.titleSmall,
+            color = Ink.Text1,
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = "搜索和首页都要靠采集站取数据\n填一个苹果 CMS V10 站点地址就能开始",
+            style = MaterialTheme.typography.labelSmall.copy(lineHeight = 18.sp),
+            color = Ink.Text3,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(16.dp))
+        PrimaryButton(
+            text = "添加采集源",
+            icon = Icons.Filled.Add,
+            onClick = onAdd,
+        )
+    }
+}
+
+/**
+ * 单个采集源一张卡。
+ *
+ * 三层信息，从上到下逐级减弱：**它是谁**（名称 / 域名）、**它能不能用**（状态胶囊）、
+ * **要不要它参与**（开关）。删除退到最右侧的灰色图标，避免和状态抢视线。
+ */
+@Composable
+private fun SourceCard(
     site: SourceSite,
-    first: Boolean,
     onToggle: (Boolean) -> Unit,
     onPing: ((SourceHealth) -> Unit) -> Unit,
     onRemove: () -> Unit,
@@ -307,9 +279,8 @@ private fun SourceRow(
     var health by remember(site.id) { mutableStateOf<SourceHealth?>(null) }
     var pinging by remember(site.id) { mutableStateOf(false) }
 
-    // 进设置页先自动测一次：以前一行行都是「测试」，用户看不出到底谁挂了。
-    LaunchedEffect(site.id) {
-        if (health == null && !pinging) {
+    val ping: () -> Unit = {
+        if (!pinging) {
             pinging = true
             onPing { result ->
                 health = result
@@ -318,88 +289,44 @@ private fun SourceRow(
         }
     }
 
-    Column {
-        if (!first) {
-            HorizontalDivider(
-                modifier = Modifier.padding(start = 46.dp),
-                thickness = 1.dp,
-                color = Ink.Line,
-            )
-        }
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            val dot = when (health) {
-                SourceHealth.ONLINE -> Accent.Online
-                SourceHealth.OFFLINE -> Accent.New
-                // 测不准用金色而不是红色：超时不代表源站挂了。
-                SourceHealth.UNKNOWN -> Accent.Gold
-                null -> Ink.Text3
-            }
-            Box(
-                modifier = Modifier
-                    .size(7.dp)
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(dot),
-            )
-            Spacer(Modifier.width(12.dp))
+    // 进页面自动测一次：满屏「测试」按钮只会让人更糊涂，先给结论再让人重测。
+    LaunchedEffect(site.id) {
+        if (health == null && !pinging) ping()
+    }
+
+    Column(
+        modifier = Modifier
+            .settingsCard()
+            .padding(start = 16.dp, end = 12.dp, top = 14.dp, bottom = 12.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(
                     text = site.name,
-                    style = MaterialTheme.typography.bodyLarge,
+                    style = MaterialTheme.typography.titleSmall.copy(fontSize = 15.sp),
                     color = if (site.enabled) Ink.Text1 else Ink.Text2,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Spacer(Modifier.height(2.dp))
+                Spacer(Modifier.height(3.dp))
                 Text(
-                    text = site.baseUrl,
-                    style = MaterialTheme.typography.labelSmall,
+                    text = site.baseUrl
+                        .removePrefix("https://")
+                        .removePrefix("http://")
+                        .trimEnd('/'),
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
                     color = Ink.Text3,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Spacer(Modifier.height(6.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                    Text(
-                        text = when {
-                            pinging -> "测试中…"
-                            health == SourceHealth.ONLINE -> "可用"
-                            health == SourceHealth.OFFLINE -> "不可用，点此重测"
-                            health == SourceHealth.UNKNOWN -> "超时未测准，点此重测"
-                            else -> "测试"
-                        },
-                        style = MaterialTheme.typography.labelMedium,
-                        color = when (health) {
-                            SourceHealth.ONLINE -> Accent.Online
-                            SourceHealth.OFFLINE -> Accent.New
-                            SourceHealth.UNKNOWN -> Accent.Gold
-                            null -> Accent.Brand
-                        },
-                        modifier = Modifier.clickable(enabled = !pinging) {
-                            pinging = true
-                            onPing { result ->
-                                health = result
-                                pinging = false
-                            }
-                        },
-                    )
-                    Text(
-                        text = "删除",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = Ink.Text3,
-                        modifier = Modifier.clickable(onClick = onRemove),
-                    )
-                }
             }
+            Spacer(Modifier.width(10.dp))
             Switch(
                 checked = site.enabled,
                 onCheckedChange = onToggle,
+                modifier = Modifier.scale(0.88f),
                 colors = SwitchDefaults.colors(
-                    checkedThumbColor = androidx.compose.ui.graphics.Color.White,
+                    checkedThumbColor = Color.White,
                     checkedTrackColor = Accent.Brand,
                     uncheckedThumbColor = Ink.Text2,
                     uncheckedTrackColor = Ink.Selected,
@@ -407,236 +334,96 @@ private fun SourceRow(
                 ),
             )
         }
-    }
-}
 
-/**
- * 版本更新行：检查 → 下载（实时进度条）→ 安装，一条链路全部内联，不打弹窗。
- *
- * 进度不是转圈猜的：下载走库的流式接口，每 256 KB 回填一次字节数，
- * 所以能看到「45% · 11.2 / 24.4 MB」这种真实读数。
- */
-@Composable
-private fun VersionRow(container: AppContainer) {
-    val state by container.update.collectAsState()
-    var actionError by remember { mutableStateOf<String?>(null) }
+        Spacer(Modifier.height(10.dp))
 
-    // 浏览器兜底：应用内下载走的是 GitHub 的 302 + API 配额，卡住时浏览器是唯一出路。
-    val openInBrowser: () -> Unit = {
-        actionError = if (container.openDownloadInBrowser()) {
-            null
-        } else {
-            "没有找到可用的浏览器，无法外部下载"
-        }
-    }
-
-    val statusText = when (val s = state) {
-        UpdateUiState.Idle -> "点右侧检查是否有新版本"
-        UpdateUiState.Checking -> "正在检查…"
-        is UpdateUiState.UpToDate -> "已是最新版本（${s.tag}）"
-        is UpdateUiState.Available -> "发现新版本 ${s.tag}"
-        // 百分比单独画在标题行，这里不再重复；网速/剩余时间也去掉，一行放不下还会折行。
-        is UpdateUiState.Downloading -> ""
-        is UpdateUiState.Ready -> "新版本已下载，点「安装」"
-        is UpdateUiState.Failed -> "失败：${s.message}"
-    }
-
-    // 下载中显示在标题右侧的百分比：整个界面只保留这一个。
-    val percent = (state as? UpdateUiState.Downloading)
-        ?.fraction
-        ?.let { (it * 100).toInt() }
-
-    val accentStatus = state is UpdateUiState.Available ||
-        state is UpdateUiState.Ready ||
-        state is UpdateUiState.Downloading
-
-    Column {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(
-                imageVector = Icons.Filled.CloudDownload,
-                contentDescription = null,
-                tint = Ink.Text2,
-                modifier = Modifier.size(18.dp),
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            val (label, color) = when {
+                pinging -> "测试中" to Ink.Text3
+                health == SourceHealth.ONLINE -> "可用" to Accent.Online
+                health == SourceHealth.OFFLINE -> "不可用" to Accent.New
+                health == SourceHealth.UNKNOWN -> "超时未测准" to Accent.Gold
+                else -> "未测试" to Ink.Text3
+            }
+            // 胶囊只负责「显示结论」，重测统一交给右边的文字按钮，避免同一件事两个入口。
+            StatusPill(text = label, color = color)
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = if (pinging) "…" else "重测",
+                style = MaterialTheme.typography.labelMedium,
+                color = if (pinging) Ink.Text3 else Accent.Brand,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(enabled = !pinging, onClick = ping)
+                    .padding(horizontal = 8.dp, vertical = 8.dp),
             )
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = "版本更新",
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = Ink.Text1,
-                    )
-                    if (percent != null) {
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            text = "$percent%",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = Accent.Gold,
-                            fontWeight = FontWeight.Bold,
-                        )
-                    }
-                }
-                if (statusText.isNotEmpty()) {
-                    Spacer(Modifier.height(2.dp))
-                    Text(
-                        text = statusText,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = when {
-                            state is UpdateUiState.Failed -> WarnColor
-                            accentStatus -> Accent.Gold
-                            else -> Ink.Text3
-                        },
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-            Spacer(Modifier.width(10.dp))
-            when (val s = state) {
-                UpdateUiState.Idle -> GhostButton(
-                    text = "检查更新",
-                    modifier = Modifier.height(34.dp),
-                    onClick = { container.checkUpdate() },
-                )
-
-                UpdateUiState.Checking -> CircularProgressIndicator(
-                    color = Accent.Brand,
-                    strokeWidth = 2.dp,
-                    modifier = Modifier.size(18.dp),
-                )
-
-                is UpdateUiState.UpToDate -> GhostButton(
-                    text = "重新检查",
-                    modifier = Modifier.height(34.dp),
-                    onClick = { container.checkUpdate() },
-                )
-
-                is UpdateUiState.Available -> Row(verticalAlignment = Alignment.CenterVertically) {
-                    BrowserLink(onClick = openInBrowser)
-                    Spacer(Modifier.width(6.dp))
-                    PrimaryButton(
-                        text = "下载",
-                        modifier = Modifier.height(34.dp),
-                        onClick = { container.downloadUpdate(s.versionCode, s.asset) },
-                    )
-                }
-
-                is UpdateUiState.Downloading -> GhostButton(
-                    text = "取消",
-                    modifier = Modifier.height(34.dp),
-                    onClick = { container.cancelDownload() },
-                )
-
-                is UpdateUiState.Ready -> PrimaryButton(
-                    text = "安装",
-                    modifier = Modifier.height(34.dp),
-                    onClick = {
-                        when (val r = container.installUpdate(s.file)) {
-                            InstallResult.Launched -> actionError = null
-                            is InstallResult.Failure -> actionError = "安装失败：${r.message}"
-                        }
-                    },
-                )
-
-                is UpdateUiState.Failed -> GhostButton(
-                    text = "重试",
-                    modifier = Modifier.height(34.dp),
-                    onClick = { container.retryDownload() },
-                )
-            }
-        }
-
-        val downloading = state as? UpdateUiState.Downloading
-        if (downloading != null) {
+            Spacer(Modifier.weight(1f))
             Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 46.dp, end = 16.dp, bottom = 12.dp)
-                    .height(4.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(Ink.Line),
+                    .size(40.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable(onClick = onRemove),
+                contentAlignment = Alignment.Center,
             ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth((downloading.fraction ?: 0f).coerceIn(0f, 1f))
-                        .height(4.dp)
-                        .clip(RoundedCornerShape(2.dp))
-                        .background(Accent.Gold),
+                Icon(
+                    imageVector = Icons.Filled.DeleteOutline,
+                    contentDescription = "删除该源",
+                    tint = Ink.Text3,
+                    modifier = Modifier.size(18.dp),
                 )
             }
         }
-
-        // 下载中 / 失败时补一条浏览器通道：应用内下载卡住时用户没有别的出路。
-        if (state is UpdateUiState.Downloading || state is UpdateUiState.Failed) {
-            BrowserLink(
-                text = "改用浏览器下载",
-                modifier = Modifier.padding(start = 42.dp, bottom = 8.dp),
-                onClick = openInBrowser,
-            )
-        }
-
-        actionError?.let { message ->
-            Text(
-                text = message,
-                style = MaterialTheme.typography.labelSmall,
-                color = WarnColor,
-                modifier = Modifier.padding(start = 46.dp, end = 16.dp, bottom = 10.dp),
-            )
-        }
-
-        HorizontalDivider(modifier = Modifier.padding(start = 46.dp), thickness = 1.dp, color = Ink.Line)
     }
 }
 
-/**
- * 次级操作：把 APK 直链交给系统浏览器。
- *
- * 用文字而不是纯图标，是因为「下不下来」时用户很难猜到图标含义；
- * 又做成无边框的浅色文字，避免和在右侧的主按钮抢注意力。
- */
+/** 空心虚线按钮：和实心卡片区分开，天然读作「新建一项」。 */
 @Composable
-private fun BrowserLink(
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    text: String = "浏览器",
-) {
+private fun AddSourceButton(onClick: () -> Unit) {
+    val shape = RoundedCornerShape(14.dp)
     Row(
-        modifier = modifier
-            .height(34.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(48.dp)
+            .clip(shape)
+            .drawBehind {
+                drawRoundRect(
+                    color = Ink.LineStrong,
+                    cornerRadius = CornerRadius(14.dp.toPx()),
+                    style = Stroke(
+                        width = 1.dp.toPx(),
+                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 7f)),
+                    ),
+                )
+            }
+            .clickable(onClick = onClick),
+        horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
-            imageVector = Icons.Filled.OpenInBrowser,
+            imageVector = Icons.Filled.Add,
             contentDescription = null,
             tint = Accent.Brand,
-            modifier = Modifier.size(16.dp),
+            modifier = Modifier.size(17.dp),
         )
-        Spacer(Modifier.width(5.dp))
+        Spacer(Modifier.width(7.dp))
         Text(
-            text = text,
+            text = "添加采集源",
             style = MaterialTheme.typography.labelLarge,
             color = Accent.Brand,
-            maxLines = 1,
         )
     }
 }
 
+// ---------------------------------------------------------------- 播放与存储
+
 /**
- * 播放缓存行：显示占用 / 上限，可一键清空。
+ * 缓存卡：数字 + 占用条 + 一个动作。
  *
- * 缓存是「边看边写」的副产物，用户看不见它从哪来，所以这里必须给出
- * 明确的三件事：占了多少、最多能占多少、怎么清掉。
+ * 缓存是「边看边写」的副产物，用户看不见它从哪来，所以必须一次说清三件事：
+ * 占了多少、最多能占多少、怎么清掉。占用条让「快满了」这件事不用读数字就能感知。
  */
 @Composable
-private fun MediaCacheRow(container: AppContainer) {
+private fun CacheCard(container: AppContainer) {
     val scope = rememberCoroutineScope()
     var used by remember { mutableLongStateOf(0L) }
     var clearing by remember { mutableStateOf(false) }
@@ -646,21 +433,39 @@ private fun MediaCacheRow(container: AppContainer) {
         used = withContext(Dispatchers.IO) { container.mediaCacheBytes }
     }
 
-    RowItem(
-        title = "边看边缓存",
-        subtitle = notice ?: "已用 ${formatCacheSize(used)} / 上限 " +
-            "${formatCacheSize(container.mediaCacheLimitBytes)}，重看不重复下载",
-        first = true,
-        showChevron = false,
-        leading = {
+    val limit = container.mediaCacheLimitBytes
+    val fraction = if (limit > 0) (used.toFloat() / limit).coerceIn(0f, 1f) else 0f
+    val percentText = when {
+        used <= 0 -> "0%"
+        fraction < 0.01f -> "<1%"
+        else -> "${(fraction * 100).toInt()}%"
+    }
+
+    Column(modifier = Modifier.settingsCard().padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(
                 imageVector = Icons.Filled.Storage,
                 contentDescription = null,
                 tint = Ink.Text2,
                 modifier = Modifier.size(18.dp),
             )
-        },
-        trailing = {
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = "边看边缓存",
+                    style = MaterialTheme.typography.titleSmall.copy(fontSize = 15.sp),
+                    color = Ink.Text1,
+                )
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    text = notice ?: "重看已缓存的集数不再走网络",
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+                    color = if (notice != null) Accent.Gold else Ink.Text3,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Spacer(Modifier.width(10.dp))
             if (clearing) {
                 CircularProgressIndicator(
                     color = Accent.Gold,
@@ -670,7 +475,7 @@ private fun MediaCacheRow(container: AppContainer) {
             } else {
                 GhostButton(
                     text = "清除",
-                    modifier = Modifier.height(34.dp),
+                    modifier = Modifier.height(32.dp),
                     enabled = used > 0,
                     onClick = {
                         scope.launch {
@@ -688,8 +493,367 @@ private fun MediaCacheRow(container: AppContainer) {
                     },
                 )
             }
-        },
-    )
+        }
+
+        Spacer(Modifier.height(14.dp))
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(6.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(Ink.Line),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(fraction)
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(Accent.Gold),
+                )
+            }
+            Spacer(Modifier.width(10.dp))
+            Text(
+                text = percentText,
+                style = MaterialTheme.typography.labelMedium,
+                color = Ink.Text2,
+            )
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        Row(Modifier.fillMaxWidth()) {
+            Text(
+                text = "已用 ${formatCacheSize(used)}",
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+                color = Ink.Text3,
+            )
+            Spacer(Modifier.weight(1f))
+            Text(
+                text = "上限 ${formatCacheSize(limit)}",
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+                color = Ink.Text3,
+            )
+        }
+    }
+}
+
+// ---------------------------------------------------------------- 版本更新
+
+/**
+ * 版本更新：检查 → 下载（带进度条）→ 安装，全部内联，不弹窗。
+ *
+ * 状态聚合成一个胶囊放在标题右侧，动作按钮永远在最右；下载中额外给一条
+ * 进度条和「取消」。这样无论处在哪个状态，视线落点都固定在同一处。
+ */
+@Composable
+private fun UpdatePanel(container: AppContainer) {
+    val state by container.update.collectAsState()
+    var actionError by remember { mutableStateOf<String?>(null) }
+
+    val openInBrowser: () -> Unit = {
+        actionError = if (container.openDownloadInBrowser()) {
+            null
+        } else {
+            "没有找到可用的浏览器，无法外部下载"
+        }
+    }
+
+    val downloading = state as? UpdateUiState.Downloading
+    val percent = downloading?.fraction?.let { (it * 100).toInt() }
+
+    // 状态胶囊：只放结论，不重复按钮上的字。
+    val (badgeText, badgeColor) = when (val s = state) {
+        UpdateUiState.Idle -> null to Ink.Text3
+        UpdateUiState.Checking -> "检查中" to Ink.Text3
+        is UpdateUiState.UpToDate -> "已是最新" to Accent.Online
+        is UpdateUiState.Available -> "新版本 ${s.tag}" to Accent.Gold
+        is UpdateUiState.Downloading -> "${percent ?: 0}%" to Accent.Brand
+        is UpdateUiState.Ready -> "待安装" to Accent.Gold
+        is UpdateUiState.Failed -> "失败" to WarnColor
+    }
+
+    Column(modifier = Modifier.settingsCard().padding(start = 16.dp, end = 12.dp, top = 14.dp, bottom = 12.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = Icons.Filled.CloudDownload,
+                contentDescription = null,
+                tint = Ink.Text2,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "版本更新",
+                        style = MaterialTheme.typography.titleSmall.copy(fontSize = 15.sp),
+                        color = Ink.Text1,
+                    )
+                    if (badgeText != null) {
+                        Spacer(Modifier.width(8.dp))
+                        StatusPill(text = badgeText, color = badgeColor)
+                    }
+                }
+                Spacer(Modifier.height(3.dp))
+                val failed = state as? UpdateUiState.Failed
+                Text(
+                    text = failed?.message ?: "可直接在应用内更新，也可交给浏览器下载",
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+                    color = if (failed != null) WarnColor else Ink.Text3,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            when (val s = state) {
+                UpdateUiState.Idle -> GhostButton(
+                    text = "检查",
+                    modifier = Modifier.height(32.dp),
+                    onClick = { container.checkUpdate() },
+                )
+
+                UpdateUiState.Checking -> CircularProgressIndicator(
+                    color = Accent.Brand,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(18.dp),
+                )
+
+                is UpdateUiState.UpToDate -> GhostButton(
+                    text = "重新检查",
+                    modifier = Modifier.height(32.dp),
+                    onClick = { container.checkUpdate() },
+                )
+
+                is UpdateUiState.Available -> PrimaryButton(
+                    text = "下载",
+                    modifier = Modifier.height(32.dp),
+                    onClick = { container.downloadUpdate(s.versionCode, s.asset) },
+                )
+
+                is UpdateUiState.Downloading -> GhostButton(
+                    text = "取消",
+                    modifier = Modifier.height(32.dp),
+                    onClick = { container.cancelDownload() },
+                )
+
+                is UpdateUiState.Ready -> PrimaryButton(
+                    text = "安装",
+                    modifier = Modifier.height(32.dp),
+                    onClick = {
+                        when (val r = container.installUpdate(s.file)) {
+                            InstallResult.Launched -> actionError = null
+                            is InstallResult.Failure -> actionError = "安装失败：${r.message}"
+                        }
+                    },
+                )
+
+                is UpdateUiState.Failed -> GhostButton(
+                    text = "重试",
+                    modifier = Modifier.height(32.dp),
+                    onClick = { container.retryDownload() },
+                )
+            }
+        }
+
+        if (downloading != null) {
+            Spacer(Modifier.height(12.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(5.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(Ink.Line),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth((downloading.fraction ?: 0f).coerceIn(0f, 1f))
+                        .height(5.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(Accent.Gold),
+                )
+            }
+        }
+
+        // 应用内下载走 GitHub 的 302 + 配额，卡住时浏览器是唯一出路，入口必须一直可见。
+        if (state is UpdateUiState.Available ||
+            state is UpdateUiState.Downloading ||
+            state is UpdateUiState.Failed
+        ) {
+            Spacer(Modifier.height(6.dp))
+            BrowserLink(
+                text = if (state is UpdateUiState.Downloading) "太慢？用浏览器下载" else "用浏览器下载",
+                onClick = openInBrowser,
+            )
+        }
+
+        actionError?.let { message ->
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = message,
+                style = MaterialTheme.typography.labelSmall,
+                color = WarnColor,
+            )
+        }
+    }
+}
+
+/**
+ * 次级操作：把 APK 直链交给系统浏览器。
+ *
+ * 用文字而不是纯图标：下不来的时候用户很难猜到图标含义；
+ * 同时又做成无边框浅色文字，避免和右侧的主按钮抢注意力。
+ */
+@Composable
+private fun BrowserLink(
+    onClick: () -> Unit,
+    text: String = "用浏览器下载",
+) {
+    Row(
+        modifier = Modifier
+            .height(30.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = Icons.Filled.OpenInBrowser,
+            contentDescription = null,
+            tint = Accent.Brand,
+            modifier = Modifier.size(14.dp),
+        )
+        Spacer(Modifier.width(5.dp))
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelMedium,
+            color = Accent.Brand,
+            maxLines = 1,
+        )
+    }
+}
+
+// ---------------------------------------------------------------- 关于
+
+@Composable
+private fun AboutPanel() {
+    val context = LocalContext.current
+    Column(modifier = Modifier.settingsCard()) {
+        InfoRow(
+            title = "应用版本",
+            value = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+            subtitle = "打包于 ${BuildConfig.BUILD_TIME}",
+        )
+        HorizontalDivider(
+            modifier = Modifier.padding(start = 16.dp),
+            thickness = 1.dp,
+            color = Ink.Line,
+        )
+        InfoRow(
+            title = "开源仓库",
+            value = "GitHub",
+            showExternal = true,
+            onClick = {
+                runCatching {
+                    context.startActivity(
+                        Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/lwtor/Starpick")),
+                    )
+                }
+            },
+        )
+        HorizontalDivider(
+            modifier = Modifier.padding(start = 16.dp),
+            thickness = 1.dp,
+            color = Ink.Line,
+        )
+        Text(
+            text = "星匣不内置、不预置任何影视内容，播放源由用户自行配置。\n本项目以 MIT 协议开源，与任何内容提供方无关。",
+            style = MaterialTheme.typography.labelSmall.copy(lineHeight = 18.sp),
+            color = Ink.Text3,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+        )
+    }
+}
+
+@Composable
+private fun InfoRow(
+    title: String,
+    value: String,
+    subtitle: String? = null,
+    showExternal: Boolean = false,
+    onClick: (() -> Unit)? = null,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyLarge,
+                color = Ink.Text1,
+            )
+            if (subtitle != null) {
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+                    color = Ink.Text3,
+                )
+            }
+        }
+        Spacer(Modifier.width(10.dp))
+        Text(
+            text = value,
+            style = MaterialTheme.typography.labelMedium,
+            color = Ink.Text2,
+        )
+        if (showExternal) {
+            Spacer(Modifier.width(5.dp))
+            Icon(
+                imageVector = Icons.Filled.OpenInBrowser,
+                contentDescription = null,
+                tint = Ink.Text3,
+                modifier = Modifier.size(14.dp),
+            )
+        }
+    }
+}
+
+// ---------------------------------------------------------------- 小组件
+
+/** 状态胶囊：底色是同色 14% 透明，读起来像标签而不是按钮。 */
+@Composable
+private fun StatusPill(
+    text: String,
+    color: Color,
+    onClick: (() -> Unit)? = null,
+) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(7.dp))
+            .background(color.copy(alpha = 0.14f))
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 7.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(5.dp)
+                .clip(CircleShape)
+                .background(color),
+        )
+        Spacer(Modifier.width(5.dp))
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+            color = color,
+            maxLines = 1,
+        )
+    }
 }
 
 /** 缓存大小按量级取单位，1 GB 上限显示成「1.0 GB」比「1024 MB」好读。 */
@@ -736,7 +900,7 @@ private fun AddSourceSheet(container: AppContainer, onDismiss: () -> Unit) {
                     .padding(top = 10.dp, bottom = 6.dp)
                     .size(width = 36.dp, height = 4.dp)
                     .clip(RoundedCornerShape(2.dp))
-                    .background(androidx.compose.ui.graphics.Color(0x38FFFFFF)),
+                    .background(Color(0x38FFFFFF)),
             )
         },
     ) {
