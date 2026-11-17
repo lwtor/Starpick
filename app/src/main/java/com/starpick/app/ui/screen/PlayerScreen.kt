@@ -123,6 +123,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
@@ -559,21 +560,46 @@ fun PlayerSurface(
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
                         val downPos = down.position
-                        var decided = false
-                        var mode = 0 // 0=未决 1=拖动seek 2=长按倍速
+                        val pressTime = System.currentTimeMillis()
+                        var mode = 0 // 0=未决 1=拖动seek 2=长按倍速 3=纵向忽略
                         var anchorMs = 0L
                         var travelled = 0f
                         var spanMs = swipeSpanMs(0L)
                         var lastX = downPos.x
-                        val pressTime = System.currentTimeMillis()
 
                         while (true) {
-                            val event = awaitPointerEvent(PointerEventPass.Main)
+                            // 关键：手指按下后如果完全静止，系统不会发出新的移动事件，
+                            // 原来「收到事件再比较时间」的写法会让长按判定永远等不到，
+                            // 直到抬手才被当成短按（所以松开反而弹出控制条）。
+                            // 这里给「等待事件」本身加超时，且按按下时刻算剩余时间——
+                            // 中途的微小抖动不会重置长按计时。
+                            val remaining = holdTimeoutMs - (System.currentTimeMillis() - pressTime)
+                            val event = if (mode != 0) {
+                                awaitPointerEvent(PointerEventPass.Main)
+                            } else if (remaining <= 0) {
+                                null
+                            } else {
+                                withTimeoutOrNull(remaining) {
+                                    awaitPointerEvent(PointerEventPass.Main)
+                                }
+                            }
+
+                            if (event == null) {
+                                // 按住到时仍未裁决 → 长按倍速
+                                mode = 2
+                                speedBeforeHold = playbackSpeed
+                                holdSpeed = 2f
+                                swipeTargetMs = null
+                                swipeHideToken++
+                                continue
+                            }
+
                             val change = event.changes.firstOrNull { it.id == down.id }
                             if (change == null || !change.pressed) {
-                                // 抬手 / 取消
-                                if (!decided) {
-                                    // 短按：区分单击与双击（300ms 内算双击）
+                                // 抬手 / 取消：只有「从未裁决（mode==0）」才算点击。
+                                // 一旦进了长按倍速 / seek / 纵向忽略，抬手绝不再触发点击逻辑，
+                                // 否则长按松手会误弹出控制面板。
+                                if (mode == 0) {
                                     val now = System.currentTimeMillis()
                                     if (now - lastTapAt < 300L) {
                                         togglePlay()
@@ -583,50 +609,37 @@ fun PlayerSurface(
                                         if (showControls) showControls = false else nudgeControls()
                                     }
                                 } else {
-                                    when (mode) {
-                                        1 -> commitSwipeSeek()
-                                        2 -> { /* 松手还原常速 */ }
-                                    }
+                                    if (mode == 1) commitSwipeSeek()
                                     holdSpeed = null
                                     swipeTargetMs = null
+                                    // 非点击手势不参与双击判定，清掉计时避免影响下一次点击。
+                                    lastTapAt = 0L
                                 }
                                 break
                             }
 
                             val dx = change.position.x - downPos.x
                             val dy = change.position.y - downPos.y
-                            val elapsed = System.currentTimeMillis() - pressTime
 
-                            if (!decided) {
-                                if (kotlin.math.abs(dx) > touchSlop &&
-                                    kotlin.math.abs(dx) > kotlin.math.abs(dy)
-                                ) {
-                                    // 先横移：判为 seek
-                                    decided = true
-                                    mode = 1
-                                    change.consume()
-                                    swipeHideToken++
-                                    anchorMs = player.currentPosition.coerceAtLeast(0L)
-                                    travelled = 0f
-                                    lastX = change.position.x
-                                    val total = player.duration
-                                    spanMs = if (total > 0) swipeSpanMs(total) else swipeSpanMs(0L)
-                                } else if (elapsed >= holdTimeoutMs &&
-                                    kotlin.math.abs(dy) <= touchSlop &&
-                                    kotlin.math.abs(dx) <= touchSlop
-                                ) {
-                                    // 按住不动超时：判为长按倍速
-                                    decided = true
-                                    mode = 2
-                                    change.consume()
-                                    speedBeforeHold = playbackSpeed
-                                    holdSpeed = 2f
-                                    swipeTargetMs = null
-                                    swipeHideToken++
-                                } else if (kotlin.math.abs(dy) > touchSlop) {
-                                    // 纵向移动：不处理，交出去（退化为无操作）
-                                    decided = true
-                                    mode = 3
+                            if (mode == 0) {
+                                when {
+                                    kotlin.math.abs(dx) > touchSlop &&
+                                        kotlin.math.abs(dx) > kotlin.math.abs(dy) -> {
+                                        // 先横移：判为 seek
+                                        mode = 1
+                                        change.consume()
+                                        swipeHideToken++
+                                        anchorMs = player.currentPosition.coerceAtLeast(0L)
+                                        travelled = 0f
+                                        lastX = change.position.x
+                                        val total = player.duration
+                                        spanMs = if (total > 0) swipeSpanMs(total) else swipeSpanMs(0L)
+                                    }
+                                    kotlin.math.abs(dy) > touchSlop -> {
+                                        // 纵向移动：不处理，交出去（退化为无操作）
+                                        mode = 3
+                                    }
+                                    // 仍在 touchSlop 内：保持未决，继续等超时或抬手
                                 }
                             }
 
@@ -683,20 +696,20 @@ fun PlayerSurface(
             }
         }
 
-        // 长按倍速提示：居中一个速度大字形，松手即消失。
+        // 长按倍速提示：小胶囊贴在画面上方，避开屏幕中央，松手即消失。
         holdSpeed?.let { speed ->
             Box(
                 modifier = Modifier
-                    .align(Alignment.Center)
-                    .size(96.dp)
-                    .background(Color(0x99000000), CircleShape),
-                contentAlignment = Alignment.Center,
+                    .align(Alignment.TopCenter)
+                    .padding(top = 96.dp)
+                    .background(Color(0xC4000000), RoundedCornerShape(20.dp))
+                    .padding(horizontal = 14.dp, vertical = 6.dp),
             ) {
                 Text(
                     text = "${formatSpeed(speed)}x",
                     color = Color.White,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 30.sp,
+                    fontSize = 18.sp,
                 )
             }
         }
