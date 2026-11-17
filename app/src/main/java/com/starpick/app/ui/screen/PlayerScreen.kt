@@ -498,19 +498,15 @@ fun PlayerSurface(
                     var anchorMs = 0L
                     var travelled = 0f
                     // 整屏宽度对应的跳转量按视频时长算：长片滑同样距离走得更远，短片更细腻。
-                    var spanMs = SWIPE_SEEK_MIN_MS
+                    var spanMs = swipeSpanMs(0L)
                     detectHorizontalDragGestures(
                         onDragStart = {
                             swipeHideToken++
                             anchorMs = player.currentPosition.coerceAtLeast(0L)
                             travelled = 0f
                             val total = player.duration
-                            spanMs = if (total > 0) {
-                                (total * SWIPE_SEEK_FRACTION)
-                                    .coerceIn(SWIPE_SEEK_MIN_MS, SWIPE_SEEK_MAX_MS)
-                            } else {
-                                SWIPE_SEEK_MIN_MS
-                            }
+                            // 档位在按下时按当前时长定一次，拖动过程中不跟着播放进度变。
+                            spanMs = if (total > 0) swipeSpanMs(total) else swipeSpanMs(0L)
                         },
                         onHorizontalDrag = { change, amount ->
                             change.consume()
@@ -541,12 +537,12 @@ fun PlayerSurface(
                     targetMs = target,
                     modifier = Modifier
                         .padding(bottom = 8.dp)
-                        .width(if (isLandscape) 224.dp else 176.dp)
+                        .width(if (isLandscape) 260.dp else 200.dp)
                         .aspectRatio(16f / 9f)
                         .background(Color.Black)
-                        // PlayerView 用的是 SurfaceView，不吃 Compose 的 clip：
-                        // 只给边框做圆角，画面本身保持方形，避免四角露出圆弧缺口。
-                        .border(1.dp, Color(0x40FFFFFF), RoundedCornerShape(8.dp)),
+                        // SurfaceView 不吃 Compose 的 clip，做圆角会在四角露出直角画面；
+                        // 索性按 B 站那种直角细边框来。
+                        .border(1.dp, Color(0x4DFFFFFF)),
                 )
                 SwipeSeekHint(
                     deltaMs = swipeDeltaMs,
@@ -1135,8 +1131,9 @@ private fun SwipeFramePreview(
         factory = { ctx ->
             PlayerView(ctx).apply {
                 useController = false
-                // 取帧窗口用 FIT：整帧可见比裁满更有参考价值。
-                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                // 铺满取景框、多出来的部分裁掉：目标帧的构图和正片一致，比留黑边更好认。
+                // 注意 ZOOM 只在视频比例与窗口不同时才有裁剪，比例一致时等同于 FIT。
+                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                 setShutterBackgroundColor(android.graphics.Color.BLACK)
                 this.player = player
             }
@@ -1277,14 +1274,25 @@ private fun Throwable.causedByUnknownHost(): Boolean {
 }
 
 /**
- * 横向滑动整屏宽度对应的跳转时长：按时长的 5% 算，再夹在 [20 秒, 10 分钟] 之间。
+ * 横向滑动整屏宽度对应的跳转时长，按片长分三档。
  *
- * 固定秒数对长短片都不合适：45 分钟的剧集划一次屏只走 2 分钟太磨人，
- * 3 分钟的短片划一次就跳到一半又太糙。按时长比例算，长片快、短片细，与主流做法一致。
+ * 不做连续比例（`时长 × 5%`）是因为 45 分钟的剧集只有 2 分钟、还是太磨人；
+ * 分档后短片仍然细，剧集和电影一划就能走掉一大段，符合「粗调靠划、精调靠进度条」的习惯。
  */
-private const val SWIPE_SEEK_FRACTION = 0.05f
-private const val SWIPE_SEEK_MIN_MS = 20_000f
-private const val SWIPE_SEEK_MAX_MS = 600_000f
+private fun swipeSpanMs(durationMs: Long): Float = when {
+    // 短视频（短剧、切片、MV）：一屏 1 分钟，够细。
+    durationMs <= SHORT_FORM_MAX_MS -> 60_000f
+    // 中长视频（常规剧集、综艺）：一屏 6 分钟。
+    durationMs <= MID_FORM_MAX_MS -> 360_000f
+    // 长视频（电影、长纪录片）：一屏 12 分钟。
+    else -> 720_000f
+}
+
+/** 20 分钟以内算短视频。 */
+private const val SHORT_FORM_MAX_MS = 20 * 60_000L
+
+/** 70 分钟以内算中长视频，超过就是电影级。 */
+private const val MID_FORM_MAX_MS = 70 * 60_000L
 
 private fun formatSpeed(speed: Float): String =
     if (speed == speed.toInt().toFloat()) speed.toInt().toString() else speed.toString()
