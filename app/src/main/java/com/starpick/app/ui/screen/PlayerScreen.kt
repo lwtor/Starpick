@@ -11,7 +11,6 @@ import android.view.View
 import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -72,7 +71,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
@@ -95,6 +97,8 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.hls.HlsManifest
+import androidx.media3.exoplayer.hls.playlist.HlsMediaPlaylist
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
@@ -241,8 +245,10 @@ fun PlayerSurface(
     var isPlaying by remember { mutableStateOf(true) }
     var positionMs by remember { mutableLongStateOf(0L) }
     var durationMs by remember { mutableLongStateOf(0L) }
-    // 已经预载（含磁盘缓存命中）到的位置，进度条用它画出「已缓存」那一段。
+    // 已经预载（含磁盘缓存命中）到的位置，非 HLS 时退回用它画缓存段。
     var bufferedMs by remember(player) { mutableLongStateOf(0L) }
+    // HLS：磁盘上真正落盘的分片区间（按比例），进度条逐段画，不再只画播放头前面那一截。
+    var cachedRanges by remember(player) { mutableStateOf<List<CachedRange>>(emptyList()) }
     // 横向滑动快进 / 快退：拖动中只更新预览，松手才真正 seek，避免一路拖动触发几十次跳转。
     var swipeTargetMs by remember { mutableStateOf<Long?>(null) }
     var swipeDeltaMs by remember { mutableLongStateOf(0L) }
@@ -347,12 +353,16 @@ fun PlayerSurface(
                     duration = player.duration.takeIf { it > 0 } ?: 0L,
                     playing = player.isPlaying,
                     buffered = player.bufferedPosition.coerceAtLeast(0L),
+                    manifest = player.currentManifest,
                 )
             }
             if (!scrubbing) positionMs = snapshot.position
             durationMs = snapshot.duration
             isPlaying = snapshot.playing
             bufferedMs = snapshot.buffered
+            cachedRanges = (snapshot.manifest as? HlsManifest)?.let {
+                hlsCachedRanges(it, container, snapshot.duration)
+            } ?: emptyList()
             lastPosition = snapshot.position
             lastDuration = snapshot.duration
             if (++tick % 10 == 0) {
@@ -644,6 +654,7 @@ fun PlayerSurface(
             positionMs = if (scrubbing) (scrubFraction * durationMs.toFloat()).toLong() else positionMs,
             durationMs = durationMs,
             bufferedMs = bufferedMs,
+            cachedRanges = cachedRanges,
             playbackSpeed = playbackSpeed,
             isLandscape = isLandscape,
             visible = showControls,
@@ -795,6 +806,7 @@ private fun PlayerControls(
     positionMs: Long,
     durationMs: Long,
     bufferedMs: Long,
+    cachedRanges: List<CachedRange>,
     playbackSpeed: Float,
     isLandscape: Boolean,
     scrubbing: Boolean,
@@ -935,11 +947,11 @@ private fun PlayerControls(
                     fraction = if (scrubbing) scrubFraction else {
                         if (durationMs > 0) (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
                     },
-                    // 已缓存段：拖动时按松手后的目标位置算，否则用播放器的预载位置。
-                    bufferedFraction = if (durationMs > 0) {
-                        (bufferedMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
-                    } else {
-                        0f
+                    // HLS 按磁盘上的分片逐段画；非 HLS 退回播放器的预载位置。
+                    cachedRanges = cachedRanges.ifEmpty {
+                        if (bufferedMs > 0 && durationMs > 0) {
+                            listOf(CachedRange(0f, (bufferedMs.toFloat() / durationMs).coerceIn(0f, 1f)))
+                        } else emptyList()
                     },
                     scrubbing = scrubbing,
                     onScrub = onScrub,
@@ -972,15 +984,15 @@ private fun PlayerControls(
 /**
  * 播放进度条：3dp 细轨 + 9dp 小圆点，拖动时加粗放大。
  *
- * 三段配色（从暗到亮）：未缓存底色 → 已缓存段（白 55%）→ 已播段（金色）。
- * 已缓存段带上 400ms 补间，避免 500ms 轮询带来的跳跃感。
+ * 三段配色（从暗到亮）：未缓存底色 → 已缓存分片（白 55%）→ 已播段（金色）。
+ * 缓存段不是「播放头前面一截」，而是磁盘上每一段分片各自的位置。
  * 手势自己接：横向拖动改进度，点一下轨道直接跳。
  */
 @Composable
 private fun PlayerSeekBar(
     modifier: Modifier = Modifier,
     fraction: Float,
-    bufferedFraction: Float,
+    cachedRanges: List<CachedRange>,
     scrubbing: Boolean,
     onScrub: (Float) -> Unit,
     onScrubFinished: () -> Unit,
@@ -990,12 +1002,6 @@ private fun PlayerSeekBar(
     val safeFraction = fraction.coerceIn(0f, 1f)
     // 已缓存段独立于播放点：拖动到未缓存区域时缓存段会短于金色段，直接画在金色下面即可，
     // 不要把它拉到播放点以后，否则「没缓存的地方」会被涂成已缓存，反而误导。
-    val safeBuffered = animateFloatAsState(
-        targetValue = bufferedFraction.coerceIn(0f, 1f),
-        animationSpec = tween(durationMillis = 400),
-        label = "buffered",
-    )
-
     Box(
         modifier = modifier
             .height(28.dp)
@@ -1020,21 +1026,26 @@ private fun PlayerSeekBar(
             },
         contentAlignment = Alignment.CenterStart,
     ) {
-        // 底：尚未缓存
+        // 底：未缓存 + 已落盘的分片。HLS 一段视频对应许多分片，逐段画才能如实反映
+        // 「看过 / 拖到过 / 跳过」的位置；连续分片在 hlsCachedRanges 里已合并。
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(trackHeight)
                 .clip(RoundedCornerShape(trackHeight / 2))
-                .background(Color(0x33FFFFFF)),
-        )
-        // 中：已缓存（含磁盘缓存命中，重看时这一段会直接铺满）
-        Box(
-            modifier = Modifier
-                .fillMaxWidth(safeBuffered.value)
-                .height(trackHeight)
-                .clip(RoundedCornerShape(trackHeight / 2))
-                .background(Color(0x8CFFFFFF)),
+                .drawBehind {
+                    drawRect(color = Color(0x33FFFFFF), size = size)
+                    cachedRanges.forEach { range ->
+                        drawRect(
+                            color = Color(0x8CFFFFFF),
+                            topLeft = Offset(range.start * size.width, 0f),
+                            size = Size(
+                                ((range.end - range.start) * size.width).coerceAtLeast(0f),
+                                size.height,
+                            ),
+                        )
+                    }
+                },
         )
         // 上：已播放
         Box(
@@ -1360,7 +1371,57 @@ private data class PlayerSnapshot(
     val duration: Long,
     val playing: Boolean,
     val buffered: Long,
+    val manifest: Any?,
 )
+
+/** 进度条上的一段已落盘区间，0f~1f 相对整集时长。 */
+private data class CachedRange(val start: Float, val end: Float)
+
+/**
+ * 把 HLS 媒体播放列表里的分片映射到时间轴，只留下磁盘上真有数据的分片。
+ *
+ * `bufferedPosition` 只能表示「播放头前方内存里预读了多少」，播过的和拖过的地方都看不到；
+ * 这里改问 `SimpleCache`：每个分片 URL 的 key 有没有 span。命中的分片按自己的
+ * `relativeStartTimeUs / durationUs` 画成一小段，于是看过、跳过、拖过的片段都能留在进度条上。
+ * 连续分片合并成一段，避免几百个 Rect 把绘制拖慢。
+ */
+private fun hlsCachedRanges(
+    manifest: HlsManifest,
+    container: AppContainer,
+    durationMs: Long,
+): List<CachedRange> {
+    val playlist: HlsMediaPlaylist = manifest.mediaPlaylist
+    val segments = playlist.segments
+    if (durationMs <= 0 || segments.isEmpty()) return emptyList()
+
+    val originUs = segments.first().relativeStartTimeUs
+    val ranges = mutableListOf<CachedRange>()
+    for (segment in segments) {
+        if (segment.url.isBlank() || segment.durationUs <= 0) continue
+        val url = runCatching { java.net.URI(playlist.baseUri).resolve(segment.url).toString() }
+            .getOrDefault(segment.url)
+        if (container.mediaCache.getCachedSpans(container.cacheKeyForUrl(url)).isEmpty()) continue
+        val startMs = (segment.relativeStartTimeUs - originUs).coerceAtLeast(0L) / 1000L
+        val endMs = (segment.relativeStartTimeUs - originUs + segment.durationUs)
+            .coerceAtLeast(0L) / 1000L
+        if (endMs <= 0L || startMs >= durationMs) continue
+        ranges += CachedRange(
+            start = (startMs.toFloat() / durationMs).coerceIn(0f, 1f),
+            end = (endMs.toFloat() / durationMs).coerceIn(0f, 1f),
+        )
+    }
+
+    val merged = mutableListOf<CachedRange>()
+    ranges.sortedBy { it.start }.forEach { range ->
+        val last = merged.lastOrNull()
+        if (last == null || range.start > last.end + 0.001f) {
+            merged += range
+        } else {
+            merged[merged.lastIndex] = last.copy(end = maxOf(last.end, range.end))
+        }
+    }
+    return merged
+}
 
 private fun Context.findActivity(): Activity? {
     var ctx = this

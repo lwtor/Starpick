@@ -200,6 +200,9 @@ class AppContainer(context: Context) {
             .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
     }
 
+    /** 播放列表/分片 URL 对应的缓存 key，给进度条查询「这一段是否已落盘」用。 */
+    fun cacheKeyForUrl(url: String): String = Companion.cacheKeyOf(url)
+
     /** 清空播放缓存，返回释放的字节数。内部已切 IO，调用方直接 await 即可。 */
     suspend fun clearMediaCache(): Long = withContext(Dispatchers.IO) {
         val before = mediaCacheBytes
