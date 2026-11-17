@@ -350,11 +350,15 @@ fun PlayerSurface(
     // 500ms 轮询：刷新 UI 状态；每 5 秒落一次盘。
     LaunchedEffect(player) {
         var tick = 0
-        // 预加载是「持续补货」：一批前后各 5 分钟串行下完，正常播放推进不打断；
-        // 只有用户跳播（seek）跨过一大段才取消重来。
+        // 预加载是「持续补货」：每轮都按当前位置重算前后 5 分钟窗口里的空缺分片，
+        // 与当前分片是否已缓存无关（缓存命中时照样要把周围的空缺补上）。
         var prefetchJob: Job? = null
         var lastSegment = -1
-        val triedPrefetch = ConcurrentHashMap.newKeySet<String>()
+        // 只记录「正在下载」和「刚失败」的分片，不是永久黑名单：
+        //  - inflight 防止同一分片被并发起多次请求；
+        //  - 失败的过 30 秒冷却后可重试，之前没下完的、新进入窗口的都能被补上。
+        val inflight = ConcurrentHashMap.newKeySet<String>()
+        val failedAt = ConcurrentHashMap<String, Long>()
         while (isActive) {
             delay(500)
             val snapshot = withContext(Dispatchers.Main.immediate) {
@@ -373,24 +377,30 @@ fun PlayerSurface(
             val hls = snapshot.manifest as? HlsManifest
             cachedRanges = hls?.let { hlsCachedRanges(it, container, snapshot.duration) }
                 ?: emptyList()
-            // 提前把当前位置前后各 5 分钟的分片下进磁盘缓存。
-            // 一批要下几十片、耗时较长，正常播放推进不打断它；只有跳播才重算窗口。
+            // 提前把当前位置前后各 5 分钟的空缺分片下进磁盘缓存。
+            // 每轮按真实缓存状态重算，当前分片在不在缓存里都不影响周围缺口的补齐。
             if (hls != null && !scrubbing) {
                 val index = currentSegmentIndex(hls, snapshot.position)
                 if (index >= 0) {
                     if (lastSegment >= 0 && abs(index - lastSegment) > 3) {
+                        // 跳播：取消旧批次；它 in-flight 的分片标记为取消，可立即重试。
                         prefetchJob?.cancel()
                         prefetchJob = null
+                        inflight.clear()
                     }
                     lastSegment = index
                     if (prefetchJob?.isActive != true) {
-                        val pending = pendingPrefetchUrls(hls, index, container, triedPrefetch)
+                        val pending = pendingPrefetchUrls(
+                            hls, index, container, inflight, failedAt,
+                        )
                         if (pending.isNotEmpty()) {
                             prefetchJob = launch(Dispatchers.IO) {
                                 for (url in pending) {
                                     currentCoroutineContext().ensureActive()
-                                    triedPrefetch += url
-                                    container.prefetchSegment(url)
+                                    inflight += url
+                                    val ok = container.prefetchSegment(url)
+                                    inflight -= url
+                                    if (!ok) failedAt[url] = System.currentTimeMillis()
                                 }
                             }
                         }
@@ -1432,15 +1442,22 @@ private fun currentSegmentIndex(manifest: HlsManifest, positionMs: Long): Int {
 /** 预加载覆盖当前分片前后各 5 分钟。采集站一片通常 5~10 秒，按片数算根本不够看。 */
 private const val PREFETCH_WINDOW_MS = 5L * 60L * 1000L
 
+/** 下载失败的分片过多久允许重试，避免坏分片每次轮询都被重新请求。 */
+private const val PREFETCH_RETRY_MS = 30_000L
+
 /**
- * 列出当前位置前后 5 分钟内、还没落盘也没试过的分片地址。
- * 先排即将播放的（更重要），再排回看方向；真正下载由调用方串行做。
+ * 列出当前位置前后 5 分钟内、磁盘上还没有的空缺分片。
+ *
+ * 判断依据只有「真实缓存状态」，不看当前分片是否已命中缓存——否则从缓存里
+ * 续播时，周围没下到的缺口会被整段忽略。先排即将播放的（更重要），再排回看方向。
+ * 正在下载的跳过；刚失败的在冷却期内跳过，过后自动重试。
  */
 private fun pendingPrefetchUrls(
     manifest: HlsManifest,
     index: Int,
     container: AppContainer,
-    tried: MutableSet<String>,
+    inflight: Set<String>,
+    failedAt: Map<String, Long>,
 ): List<String> {
     val playlist = manifest.mediaPlaylist
     val segments = playlist.segments
@@ -1448,6 +1465,7 @@ private fun pendingPrefetchUrls(
     val current = segments[index]
     val fromUs = current.relativeStartTimeUs - PREFETCH_WINDOW_MS * 1000L
     val toUs = current.relativeStartTimeUs + current.durationUs + PREFETCH_WINDOW_MS * 1000L
+    val now = System.currentTimeMillis()
 
     val pending = mutableListOf<String>()
     fun collect(range: IntProgression) {
@@ -1460,7 +1478,9 @@ private fun pendingPrefetchUrls(
             }
             val url = runCatching { java.net.URI(playlist.baseUri).resolve(segment.url).toString() }
                 .getOrDefault(segment.url)
-            if (url in tried) continue
+            if (url in inflight) continue
+            val lastFail = failedAt[url]
+            if (lastFail != null && now - lastFail < PREFETCH_RETRY_MS) continue
             if (container.mediaCache.getCachedSpans(container.cacheKeyForUrl(url)).isNotEmpty()) {
                 continue
             }

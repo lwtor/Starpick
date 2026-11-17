@@ -205,16 +205,17 @@ class AppContainer(context: Context) {
     fun cacheKeyForUrl(url: String): String = Companion.cacheKeyOf(url)
 
     /**
-     * 主动把一个分片下载进磁盘缓存（当前分片前后各两片预加载用）。
+     * 主动把一个分片下载进磁盘缓存（当前位置前后 5 分钟预加载用）。
      *
      * 复用播放器那条带缓存的 DataSource：把分片完整读一遍丢掉，SimpleCache 顺带落盘，
-     * 之后播放或拖动到这一段就直接命中缓存。已落盘的跳过，不重复下载。
+     * 之后播放或拖动到这一段就直接命中缓存。返回 true 表示「这一段已经 OK」
+     * （本来就缓存了也算），false 表示失败或被取消，调用方据此做冷却/重试。
      * 取消时立即停，没读完的临时文件不会提交成有效 span，不会污染进度条。
      */
     suspend fun prefetchSegment(url: String): Boolean = withContext(Dispatchers.IO) {
         if (!isActive) return@withContext false
         val key = cacheKeyForUrl(url)
-        if (mediaCache.getCachedSpans(key).isNotEmpty()) return@withContext false
+        if (mediaCache.getCachedSpans(key).isNotEmpty()) return@withContext true
         val source = cachedDataSourceFactory.createDataSource()
         try {
             source.open(DataSpec.Builder().setUri(url).build())
