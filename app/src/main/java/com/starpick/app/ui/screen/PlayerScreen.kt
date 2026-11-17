@@ -557,6 +557,8 @@ fun PlayerSurface(
                 .fillMaxSize()
                 .pointerInput(player) {
                     val touchSlop = ViewConfiguration.get(context).scaledTouchSlop.toFloat()
+                    // 长按倍速换挡阈值：按屏宽取 12%，滑动足够长才切 3x / 1.5x，避免误触。
+                    val speedSlop = size.width * 0.12f
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
                         val downPos = down.position
@@ -657,9 +659,10 @@ fun PlayerSurface(
                             } else if (mode == 2) {
                                 change.consume()
                                 // 以按下点为基准：右滑 3x，左滑 1.5x，中间 2x。
+                                // 阈值用屏宽占比，避免手指轻微偏移就换挡。
                                 holdSpeed = when {
-                                    dx > touchSlop * 2 -> 3f
-                                    dx < -touchSlop * 2 -> 1.5f
+                                    dx > speedSlop -> 3f
+                                    dx < -speedSlop -> 1.5f
                                     else -> 2f
                                 }
                             }
@@ -696,20 +699,21 @@ fun PlayerSurface(
             }
         }
 
-        // 长按倍速提示：小胶囊贴在画面上方，避开屏幕中央，松手即消失。
+        // 长按倍速提示：贴左上、落在顶栏之下，避开画面中央和控制条，松手即消失。
         holdSpeed?.let { speed ->
             Box(
                 modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 96.dp)
-                    .background(Color(0xC4000000), RoundedCornerShape(20.dp))
-                    .padding(horizontal = 14.dp, vertical = 6.dp),
+                    .align(Alignment.TopStart)
+                    .displayCutoutPadding()
+                    .padding(start = 16.dp, top = 76.dp)
+                    .background(Color(0xC4000000), RoundedCornerShape(18.dp))
+                    .padding(horizontal = 12.dp, vertical = 5.dp),
             ) {
                 Text(
                     text = "${formatSpeed(speed)}x",
                     color = Color.White,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 18.sp,
+                    fontSize = 16.sp,
                 )
             }
         }
