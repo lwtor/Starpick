@@ -6,6 +6,7 @@ import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.graphics.Matrix
+import android.view.ViewConfiguration
 import android.view.TextureView
 import android.view.View
 import android.widget.FrameLayout
@@ -19,8 +20,9 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.horizontalScroll
@@ -78,6 +80,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -243,6 +246,10 @@ fun PlayerSurface(
     }
 
     var playbackSpeed by remember { mutableFloatStateOf(1f) }
+    // 长按倍速：微信视频号式——按住进入 2x，右滑 3x、左滑 1.5x，松手恢复。
+    // speedBeforeHold 记住按下前的常速，松手还原；holdSpeed 为 null 表示当前未长按。
+    var speedBeforeHold by remember { mutableFloatStateOf(1f) }
+    var holdSpeed by remember { mutableStateOf<Float?>(null) }
     var showControls by remember { mutableStateOf(true) }
     var showSheet by remember { mutableStateOf(false) }
     var scrubbing by remember { mutableStateOf(false) }
@@ -259,6 +266,8 @@ fun PlayerSurface(
     var swipeDeltaMs by remember { mutableLongStateOf(0L) }
     // 提示的延迟消失用批次号控制：新的一次滑动能作废上一次的定时器。
     var swipeHideToken by remember { mutableIntStateOf(0) }
+    // 单击 / 双击判别：记录上一次短按抬手时间，300ms 内的第二次算双击。
+    var lastTapAt by remember { mutableLongStateOf(0L) }
     val gestureScope = rememberCoroutineScope()
     var lastPosition by remember { mutableStateOf(0L) }
     var lastDuration by remember { mutableStateOf(0L) }
@@ -455,8 +464,8 @@ fun PlayerSurface(
         }
     }
 
-    LaunchedEffect(playbackSpeed) {
-        player.setPlaybackSpeed(playbackSpeed)
+    LaunchedEffect(playbackSpeed, holdSpeed) {
+        player.setPlaybackSpeed(holdSpeed ?: playbackSpeed)
     }
 
     // 横屏即全屏：隐藏系统栏；退出时恢复。
@@ -536,51 +545,113 @@ fun PlayerSurface(
             }
         }
 
-        // 整块区域的点击：单击切换控制条显隐，双击播放 / 暂停。
-        // 另外接横向拖动做快进 / 快退：向右前进，向左后退，整屏宽度对应 [SWIPE_SEEK_SPAN_MS]。
-        // 纵向手势不处理（detectHorizontalDragGestures 只认横向），留不给音量 / 亮度用。
+        // 整块区域的手势，一个状态机统一裁决，避免多个 detector 互相抢事件：
+        //  - 按下先不动、超过阈值 → 长按倍速（微信视频号式）：默认 2x，右滑 3x / 左滑 1.5x，松手还原；
+        //  - 按下立刻横滑 → 快进 / 快退预览，松手 seek；
+        //  - 短按抬手 → 单击切控制条、双击播放暂停。
+        // 纵向手势不处理，留给音量 / 亮度用。
+        val holdTimeoutMs = 320L
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(Unit) {
-                    detectTapGestures(
-                        onTap = {
-                            if (showControls) {
-                                showControls = false
-                            } else {
-                                nudgeControls()
-                            }
-                        },
-                        onDoubleTap = { togglePlay() },
-                    )
-                }
                 .pointerInput(player) {
-                    var anchorMs = 0L
-                    var travelled = 0f
-                    // 整屏宽度对应的跳转量按视频时长算：长片滑同样距离走得更远，短片更细腻。
-                    var spanMs = swipeSpanMs(0L)
-                    detectHorizontalDragGestures(
-                        onDragStart = {
-                            swipeHideToken++
-                            anchorMs = player.currentPosition.coerceAtLeast(0L)
-                            travelled = 0f
-                            val total = player.duration
-                            // 档位在按下时按当前时长定一次，拖动过程中不跟着播放进度变。
-                            spanMs = if (total > 0) swipeSpanMs(total) else swipeSpanMs(0L)
-                        },
-                        onHorizontalDrag = { change, amount ->
-                            change.consume()
-                            travelled += amount
-                            val total = player.duration
-                            if (total <= 0) return@detectHorizontalDragGestures
-                            val delta = (travelled / size.width * spanMs).toLong()
-                            val target = (anchorMs + delta).coerceIn(0L, total)
-                            swipeDeltaMs = target - anchorMs
-                            swipeTargetMs = target
-                        },
-                        onDragEnd = { commitSwipeSeek() },
-                        onDragCancel = { commitSwipeSeek() },
-                    )
+                    val touchSlop = ViewConfiguration.get(context).scaledTouchSlop.toFloat()
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val downPos = down.position
+                        var decided = false
+                        var mode = 0 // 0=未决 1=拖动seek 2=长按倍速
+                        var anchorMs = 0L
+                        var travelled = 0f
+                        var spanMs = swipeSpanMs(0L)
+                        var lastX = downPos.x
+                        val pressTime = System.currentTimeMillis()
+
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Main)
+                            val change = event.changes.firstOrNull { it.id == down.id }
+                            if (change == null || !change.pressed) {
+                                // 抬手 / 取消
+                                if (!decided) {
+                                    // 短按：区分单击与双击（300ms 内算双击）
+                                    val now = System.currentTimeMillis()
+                                    if (now - lastTapAt < 300L) {
+                                        togglePlay()
+                                        lastTapAt = 0L
+                                    } else {
+                                        lastTapAt = now
+                                        if (showControls) showControls = false else nudgeControls()
+                                    }
+                                } else {
+                                    when (mode) {
+                                        1 -> commitSwipeSeek()
+                                        2 -> { /* 松手还原常速 */ }
+                                    }
+                                    holdSpeed = null
+                                    swipeTargetMs = null
+                                }
+                                break
+                            }
+
+                            val dx = change.position.x - downPos.x
+                            val dy = change.position.y - downPos.y
+                            val elapsed = System.currentTimeMillis() - pressTime
+
+                            if (!decided) {
+                                if (kotlin.math.abs(dx) > touchSlop &&
+                                    kotlin.math.abs(dx) > kotlin.math.abs(dy)
+                                ) {
+                                    // 先横移：判为 seek
+                                    decided = true
+                                    mode = 1
+                                    change.consume()
+                                    swipeHideToken++
+                                    anchorMs = player.currentPosition.coerceAtLeast(0L)
+                                    travelled = 0f
+                                    lastX = change.position.x
+                                    val total = player.duration
+                                    spanMs = if (total > 0) swipeSpanMs(total) else swipeSpanMs(0L)
+                                } else if (elapsed >= holdTimeoutMs &&
+                                    kotlin.math.abs(dy) <= touchSlop &&
+                                    kotlin.math.abs(dx) <= touchSlop
+                                ) {
+                                    // 按住不动超时：判为长按倍速
+                                    decided = true
+                                    mode = 2
+                                    change.consume()
+                                    speedBeforeHold = playbackSpeed
+                                    holdSpeed = 2f
+                                    swipeTargetMs = null
+                                    swipeHideToken++
+                                } else if (kotlin.math.abs(dy) > touchSlop) {
+                                    // 纵向移动：不处理，交出去（退化为无操作）
+                                    decided = true
+                                    mode = 3
+                                }
+                            }
+
+                            if (mode == 1) {
+                                change.consume()
+                                travelled += change.position.x - lastX
+                                lastX = change.position.x
+                                val total = player.duration
+                                if (total > 0) {
+                                    val delta = (travelled / size.width * spanMs).toLong()
+                                    val target = (anchorMs + delta).coerceIn(0L, total)
+                                    swipeDeltaMs = target - anchorMs
+                                    swipeTargetMs = target
+                                }
+                            } else if (mode == 2) {
+                                change.consume()
+                                // 以按下点为基准：右滑 3x，左滑 1.5x，中间 2x。
+                                holdSpeed = when {
+                                    dx > touchSlop * 2 -> 3f
+                                    dx < -touchSlop * 2 -> 1.5f
+                                    else -> 2f
+                                }
+                            }
+                        }
+                    }
                 },
         )
 
@@ -608,6 +679,24 @@ fun PlayerSurface(
                     deltaMs = swipeDeltaMs,
                     targetMs = target,
                     durationMs = durationMs,
+                )
+            }
+        }
+
+        // 长按倍速提示：居中一个速度大字形，松手即消失。
+        holdSpeed?.let { speed ->
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(96.dp)
+                    .background(Color(0x99000000), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "${formatSpeed(speed)}x",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 30.sp,
                 )
             }
         }
