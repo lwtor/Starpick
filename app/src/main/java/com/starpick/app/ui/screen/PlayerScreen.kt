@@ -121,6 +121,8 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.abs
 import kotlin.math.roundToInt
 import java.net.UnknownHostException
 
@@ -348,9 +350,11 @@ fun PlayerSurface(
     // 500ms 轮询：刷新 UI 状态；每 5 秒落一次盘。
     LaunchedEffect(player) {
         var tick = 0
-        // 只在「当前分片」变化时触发预加载；新位置会取消上一批还没下完的任务。
+        // 预加载是「持续补货」：一批前后各 5 分钟串行下完，正常播放推进不打断；
+        // 只有用户跳播（seek）跨过一大段才取消重来。
         var prefetchJob: Job? = null
         var lastSegment = -1
+        val triedPrefetch = ConcurrentHashMap.newKeySet<String>()
         while (isActive) {
             delay(500)
             val snapshot = withContext(Dispatchers.Main.immediate) {
@@ -369,15 +373,27 @@ fun PlayerSurface(
             val hls = snapshot.manifest as? HlsManifest
             cachedRanges = hls?.let { hlsCachedRanges(it, container, snapshot.duration) }
                 ?: emptyList()
-            // 播放推进到新分片后，提前把前后各两个下进磁盘缓存；拖动中不预加载，
-            // 免得用户连续 seek 时反复起任务、抢正在播的那片的带宽。
+            // 提前把当前位置前后各 5 分钟的分片下进磁盘缓存。
+            // 一批要下几十片、耗时较长，正常播放推进不打断它；只有跳播才重算窗口。
             if (hls != null && !scrubbing) {
                 val index = currentSegmentIndex(hls, snapshot.position)
-                if (index >= 0 && index != lastSegment) {
+                if (index >= 0) {
+                    if (lastSegment >= 0 && abs(index - lastSegment) > 3) {
+                        prefetchJob?.cancel()
+                        prefetchJob = null
+                    }
                     lastSegment = index
-                    prefetchJob?.cancel()
-                    prefetchJob = launch(Dispatchers.IO) {
-                        prefetchAround(hls, index, container)
+                    if (prefetchJob?.isActive != true) {
+                        val pending = pendingPrefetchUrls(hls, index, container, triedPrefetch)
+                        if (pending.isNotEmpty()) {
+                            prefetchJob = launch(Dispatchers.IO) {
+                                for (url in pending) {
+                                    currentCoroutineContext().ensureActive()
+                                    triedPrefetch += url
+                                    container.prefetchSegment(url)
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1413,26 +1429,47 @@ private fun currentSegmentIndex(manifest: HlsManifest, positionMs: Long): Int {
     return if (atUs < segments.first().relativeStartTimeUs) 0 else segments.lastIndex
 }
 
+/** 预加载覆盖当前分片前后各 5 分钟。采集站一片通常 5~10 秒，按片数算根本不够看。 */
+private const val PREFETCH_WINDOW_MS = 5L * 60L * 1000L
+
 /**
- * 当前分片前后各两个分片预加载：先下即将播放的，再补回看方向的。
- * 串行下载，不和正在播的分片抢带宽；已缓存的分片由容器直接跳过。
+ * 列出当前位置前后 5 分钟内、还没落盘也没试过的分片地址。
+ * 先排即将播放的（更重要），再排回看方向；真正下载由调用方串行做。
  */
-private suspend fun prefetchAround(
+private fun pendingPrefetchUrls(
     manifest: HlsManifest,
     index: Int,
     container: AppContainer,
-) {
+    tried: MutableSet<String>,
+): List<String> {
     val playlist = manifest.mediaPlaylist
     val segments = playlist.segments
-    for (i in listOf(index + 1, index + 2, index - 1, index - 2)) {
-        currentCoroutineContext().ensureActive()
-        if (i !in segments.indices) continue
-        val segment = segments[i]
-        if (segment.url.isBlank()) continue
-        val url = runCatching { java.net.URI(playlist.baseUri).resolve(segment.url).toString() }
-            .getOrDefault(segment.url)
-        container.prefetchSegment(url)
+    if (index !in segments.indices) return emptyList()
+    val current = segments[index]
+    val fromUs = current.relativeStartTimeUs - PREFETCH_WINDOW_MS * 1000L
+    val toUs = current.relativeStartTimeUs + current.durationUs + PREFETCH_WINDOW_MS * 1000L
+
+    val pending = mutableListOf<String>()
+    fun collect(range: IntProgression) {
+        for (i in range) {
+            if (i !in segments.indices) continue
+            val segment = segments[i]
+            val start = segment.relativeStartTimeUs
+            if (segment.url.isBlank() || start + segment.durationUs <= fromUs || start >= toUs) {
+                continue
+            }
+            val url = runCatching { java.net.URI(playlist.baseUri).resolve(segment.url).toString() }
+                .getOrDefault(segment.url)
+            if (url in tried) continue
+            if (container.mediaCache.getCachedSpans(container.cacheKeyForUrl(url)).isNotEmpty()) {
+                continue
+            }
+            pending += url
+        }
     }
+    collect((index + 1) until segments.size)
+    collect((index - 1) downTo 0)
+    return pending
 }
 
 /**
