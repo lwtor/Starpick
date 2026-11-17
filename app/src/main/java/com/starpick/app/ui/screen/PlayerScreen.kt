@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -60,6 +61,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -83,6 +85,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -494,18 +497,27 @@ fun PlayerSurface(
                 .pointerInput(player) {
                     var anchorMs = 0L
                     var travelled = 0f
+                    // 整屏宽度对应的跳转量按视频时长算：长片滑同样距离走得更远，短片更细腻。
+                    var spanMs = SWIPE_SEEK_MIN_MS
                     detectHorizontalDragGestures(
                         onDragStart = {
                             swipeHideToken++
                             anchorMs = player.currentPosition.coerceAtLeast(0L)
                             travelled = 0f
+                            val total = player.duration
+                            spanMs = if (total > 0) {
+                                (total * SWIPE_SEEK_FRACTION)
+                                    .coerceIn(SWIPE_SEEK_MIN_MS, SWIPE_SEEK_MAX_MS)
+                            } else {
+                                SWIPE_SEEK_MIN_MS
+                            }
                         },
                         onHorizontalDrag = { change, amount ->
                             change.consume()
                             travelled += amount
                             val total = player.duration
                             if (total <= 0) return@detectHorizontalDragGestures
-                            val delta = (travelled / size.width * SWIPE_SEEK_SPAN_MS).toLong()
+                            val delta = (travelled / size.width * spanMs).toLong()
                             val target = (anchorMs + delta).coerceIn(0L, total)
                             swipeDeltaMs = target - anchorMs
                             swipeTargetMs = target
@@ -516,14 +528,32 @@ fun PlayerSurface(
                 },
         )
 
-        // 滑动反馈：拖的时候实时显示将跳到哪，松手后自动淡出。
+        // 滑动反馈：小窗显示目标帧 + 「±多久 / 将跳到」；松手后自动消失。
         swipeTargetMs?.takeIf { durationMs > 0 }?.let { target ->
-            SwipeSeekHint(
-                deltaMs = swipeDeltaMs,
-                targetMs = target,
-                durationMs = durationMs,
+            Column(
                 modifier = Modifier.align(Alignment.Center),
-            )
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                SwipeFramePreview(
+                    container = container,
+                    url = ready.url,
+                    mimeType = ready.mimeType,
+                    targetMs = target,
+                    modifier = Modifier
+                        .padding(bottom = 8.dp)
+                        .width(if (isLandscape) 224.dp else 176.dp)
+                        .aspectRatio(16f / 9f)
+                        .background(Color.Black)
+                        // PlayerView 用的是 SurfaceView，不吃 Compose 的 clip：
+                        // 只给边框做圆角，画面本身保持方形，避免四角露出圆弧缺口。
+                        .border(1.dp, Color(0x40FFFFFF), RoundedCornerShape(8.dp)),
+                )
+                SwipeSeekHint(
+                    deltaMs = swipeDeltaMs,
+                    targetMs = target,
+                    durationMs = durationMs,
+                )
+            }
         }
 
         // 失败时给出可操作的出口，而不是继续转圈。
@@ -1027,6 +1057,96 @@ private fun PlayerSeekBar(
 }
 
 /**
+ * 滑动时的小窗取帧预览。
+ *
+ * 主流应用（B 站 / YouTube / 腾讯视频）的进度条预览靠**服务端雪碧图**：
+ * 上传时把视频按固定间隔抽帧拼成一张大图，客户端按时间换算格子去裁。
+ * CMS 采集源只给播放地址，没有这种资源；`MediaMetadataRetriever` 又不认 m3u8，
+ * 所以设备上唯一通用的做法是再开一个播放器 seek 到目标位置、只渲染一帧。
+ *
+ * 它和主播放器共用磁盘缓存，往回拖基本命中本地分片（快）；往前拖还没缓存时
+ * 会真的去拉数据，慢一点但能出画面。找不到画面就显示黑底，不影响主画面播放。
+ */
+@Composable
+private fun SwipeFramePreview(
+    container: AppContainer,
+    url: String,
+    mimeType: String?,
+    targetMs: Long,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    // 取帧播放器按地址缓存：同一集内反复滑动复用同一个实例，换集才重建。
+    val player = remember(url) {
+        ExoPlayer.Builder(context)
+            .setMediaSourceFactory(DefaultMediaSourceFactory(container.cachedDataSourceFactory))
+            .build()
+            .apply {
+                volume = 0f
+                playWhenReady = false
+                // 只要画面，关掉音轨能省一个解码器。
+                setTrackSelectionParameters(
+                    trackSelectionParameters.buildUpon()
+                        .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
+                        .build(),
+                )
+                setMediaItem(
+                    MediaItem.Builder()
+                        .setUri(url)
+                        .apply { if (mimeType != null) setMimeType(mimeType) }
+                        .build(),
+                )
+                prepare()
+            }
+    }
+    var broken by remember(player) { mutableStateOf(false) }
+
+    // 目标位置在拖动时每秒变几十次，但每次 seek 都要 flush 解码器：
+    // 固定 200ms 取一次「最新值」，既跟得上又不会把解码器冲垮。
+    val latestTarget = rememberUpdatedState(targetMs)
+    LaunchedEffect(player) {
+        var lastSeeked = -1L
+        while (isActive) {
+            delay(200)
+            val target = latestTarget.value
+            if (target != lastSeeked) {
+                lastSeeked = target
+                player.seekTo(target)
+            }
+        }
+    }
+
+    DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                broken = true
+            }
+        }
+        player.addListener(listener)
+        onDispose {
+            player.removeListener(listener)
+            player.release()
+        }
+    }
+
+    if (broken) return
+
+    AndroidView(
+        factory = { ctx ->
+            PlayerView(ctx).apply {
+                useController = false
+                // 取帧窗口用 FIT：整帧可见比裁满更有参考价值。
+                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                setShutterBackgroundColor(android.graphics.Color.BLACK)
+                this.player = player
+            }
+        },
+        update = { it.player = player },
+        modifier = modifier,
+    )
+}
+
+/**
  * 滑动快进 / 快退时的浮层：上面是「±多久」，下面是「跳到哪个时间 / 总时长」。
  *
  * 做成半透明黑底小卡片，压在画面中央；不挡住控制条，也不跟随手指移动
@@ -1156,8 +1276,15 @@ private fun Throwable.causedByUnknownHost(): Boolean {
     return false
 }
 
-/** 横向滑动整屏宽度对应的跳转时长。2 分钟既是常见剧集时长的 5% 左右，也还够细。 */
-private const val SWIPE_SEEK_SPAN_MS = 120_000f
+/**
+ * 横向滑动整屏宽度对应的跳转时长：按时长的 5% 算，再夹在 [20 秒, 10 分钟] 之间。
+ *
+ * 固定秒数对长短片都不合适：45 分钟的剧集划一次屏只走 2 分钟太磨人，
+ * 3 分钟的短片划一次就跳到一半又太糙。按时长比例算，长片快、短片细，与主流做法一致。
+ */
+private const val SWIPE_SEEK_FRACTION = 0.05f
+private const val SWIPE_SEEK_MIN_MS = 20_000f
+private const val SWIPE_SEEK_MAX_MS = 600_000f
 
 private fun formatSpeed(speed: Float): String =
     if (speed == speed.toInt().toFloat()) speed.toInt().toString() else speed.toString()
