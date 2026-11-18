@@ -699,13 +699,14 @@ fun PlayerSurface(
             }
         }
 
-        // 长按倍速提示：贴右上角、落在顶栏之下，避开画面中央和控制条，松手即消失。
+        // 长按倍速提示：真正贴屏幕右上角，松手即消失。
+        // 不套 displayCutoutPadding：横屏刘海屏它会给右侧加一大块 padding，把提示推到右边中间。
+        // 也不加 top 偏移，直接贴顶。
         holdSpeed?.let { speed ->
             Box(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .displayCutoutPadding()
-                    .padding(end = 16.dp, top = 76.dp)
+                    .padding(end = 14.dp, top = 14.dp)
                     .background(Color(0xC4000000), RoundedCornerShape(18.dp))
                     .padding(horizontal = 12.dp, vertical = 5.dp),
             ) {
