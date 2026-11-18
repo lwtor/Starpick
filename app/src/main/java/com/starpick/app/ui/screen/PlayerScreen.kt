@@ -699,13 +699,13 @@ fun PlayerSurface(
             }
         }
 
-        // 长按倍速提示：贴左上、落在顶栏之下，避开画面中央和控制条，松手即消失。
+        // 长按倍速提示：贴右上角、落在顶栏之下，避开画面中央和控制条，松手即消失。
         holdSpeed?.let { speed ->
             Box(
                 modifier = Modifier
-                    .align(Alignment.TopStart)
+                    .align(Alignment.TopEnd)
                     .displayCutoutPadding()
-                    .padding(start = 16.dp, top = 76.dp)
+                    .padding(end = 16.dp, top = 76.dp)
                     .background(Color(0xC4000000), RoundedCornerShape(18.dp))
                     .padding(horizontal = 12.dp, vertical = 5.dp),
             ) {
@@ -805,20 +805,10 @@ fun PlayerSurface(
             durationMs = durationMs,
             bufferedMs = bufferedMs,
             cachedRanges = cachedRanges,
-            playbackSpeed = playbackSpeed,
             isLandscape = isLandscape,
             visible = showControls,
             onBack = { if (isLandscape) exitFullscreen() else onExit() },
             onTogglePlay = togglePlay,
-            onSpeed = {
-                playbackSpeed = when (playbackSpeed) {
-                    1f -> 1.25f
-                    1.25f -> 1.5f
-                    1.5f -> 2f
-                    else -> 1f
-                }
-                nudgeControls()
-            },
             onEpisodes = {
                 showSheet = true
                 nudgeControls()
@@ -957,14 +947,12 @@ private fun PlayerControls(
     durationMs: Long,
     bufferedMs: Long,
     cachedRanges: List<CachedRange>,
-    playbackSpeed: Float,
     isLandscape: Boolean,
     scrubbing: Boolean,
     scrubFraction: Float,
     visible: Boolean,
     onBack: () -> Unit,
     onTogglePlay: () -> Unit,
-    onSpeed: () -> Unit,
     onEpisodes: () -> Unit,
     onFullscreen: () -> Unit,
     onScrub: (Float) -> Unit,
@@ -1027,17 +1015,8 @@ private fun PlayerControls(
                         )
                     }
                 }
-                TextAction("选集", onClick = onEpisodes)
-                Text(
-                    text = "${formatSpeed(playbackSpeed)}x",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = Accent.Gold,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable(onClick = onSpeed)
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
-                )
+                // 选集只在全屏时出现：竖屏下方本来就有完整选集列表，这里再放一个重复。
+                if (isLandscape) TextAction("选集", onClick = onEpisodes)
             }
         }
 
