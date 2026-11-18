@@ -321,7 +321,7 @@ private fun TopBar(
             color = Color(0xB3FFFFFF),
         )
         Spacer(Modifier.weight(1f))
-        RoundIcon(Icons.Filled.Search, "搜索豆瓣", enabled = true, onClick = onSearch)
+        RoundIcon(Icons.Filled.Search, "搜索", enabled = true, onClick = onSearch)
     }
 }
 

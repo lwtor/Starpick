@@ -21,11 +21,20 @@ import kotlinx.coroutines.withTimeout
  */
 class SearchAggregator(private val api: CmsV10Api) {
 
-    suspend fun search(sites: List<SourceSite>, keyword: String): SearchOutcome = supervisorScope {
+    /**
+     * N 个源并行搜索第 [page] 页：单源超时或失败不影响其他源。
+     * 苹果 CMS 的 `pg` 每页条数由站点决定（常见 20 条），所以搜索页要「加载更多」时
+     * 用这个逐页取，而不是一次把整站拉下来。
+     */
+    suspend fun search(
+        sites: List<SourceSite>,
+        keyword: String,
+        page: Int = 1,
+    ): SearchOutcome = supervisorScope {
         val jobs = sites.filter { it.enabled }.map { site ->
             async {
                 val result = runCatching {
-                    withTimeout(PER_SOURCE_TIMEOUT_MS) { api.search(site, keyword) }
+                    withTimeout(PER_SOURCE_TIMEOUT_MS) { api.search(site, keyword, page) }
                 }
                 site to result
             }
@@ -40,8 +49,25 @@ class SearchAggregator(private val api: CmsV10Api) {
     }
 
     /** UI 直接消费的形态：同名结果聚成一组，组内保留各源条目供换源。 */
-    suspend fun grouped(sites: List<SourceSite>, keyword: String): SearchOutcome =
-        toOutcome(search(sites, keyword))
+    suspend fun grouped(
+        sites: List<SourceSite>,
+        keyword: String,
+        page: Int = 1,
+    ): SearchOutcome = toOutcome(search(sites, keyword, page))
+
+    /**
+     * 把多页结果合成一份：按 `sourceId:vodId` 去掉跨页重复（不同站调整分页时会重复），
+     * 再按标题重新分组、按源数量排序。翻页时调用方只保留合并后的这一份。
+     */
+    fun merge(outcomes: List<SearchOutcome>): SearchOutcome {
+        val items = outcomes.flatMap { it.items }.distinctBy { it.key }
+        return toOutcome(
+            SearchOutcome(
+                items = items,
+                failedSources = outcomes.flatMap { it.failedSources }.distinct(),
+            ),
+        )
+    }
 
     /**
      * 逐源推送的版本：每个源返回就 emit 一次「当前已收集到的全部结果」。

@@ -11,11 +11,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Explore
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material.icons.outlined.Explore
-import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.VideoLibrary
 import androidx.compose.material3.Icon
@@ -42,9 +40,7 @@ import com.starpick.app.core.model.VodItem
 import com.starpick.app.core.model.WatchProgress
 import com.starpick.app.ui.screen.DetailScreen
 import com.starpick.app.ui.screen.DiscoverScreen
-import com.starpick.app.ui.screen.DiscoverSearchScreen
 import com.starpick.app.ui.screen.DiscoverUiState
-import com.starpick.app.ui.screen.DoubanSearchUiState
 import com.starpick.app.ui.screen.HomeScreen
 import com.starpick.app.ui.screen.HomeUiState
 import com.starpick.app.ui.screen.ResolvingScreen
@@ -63,14 +59,17 @@ import com.starpick.app.ui.theme.Ink
 sealed interface Screen {
     data object Discover : Screen
     data object Home : Screen
-    data object Search : Screen
     data object Settings : Screen
 
     /** 内容源管理：设置里的二级页，配一次就不常来，所以不占设置首屏。 */
     data object Sources : Screen
 
-    /** 独立搜索页：只查豆瓣条目，与底部「搜索」（查采集源）分工不同。 */
-    data object DiscoverSearch : Screen
+    /**
+     * 搜索：首页顶栏进入的二级页，一次搜索同时查豆瓣片和采集源，
+     * 用「全部 / 豆瓣 / 视频源」三个 tab 分维度看。
+     */
+    data object Search : Screen
+
     /**
      * [enrichTitle] 非空时，详情页会按这个片名在后台补齐其余源。
      * 入口只带了一条记录（历史 / 收藏）或只等到第一个命中的源时用它。
@@ -95,7 +94,6 @@ private data class TabSpec(
 private val tabs = listOf(
     TabSpec(Screen.Discover, "首页", Icons.Outlined.Explore, Icons.Filled.Explore),
     TabSpec(Screen.Home, "片匣", Icons.Outlined.VideoLibrary, Icons.Filled.VideoLibrary),
-    TabSpec(Screen.Search, "搜索", Icons.Outlined.Search, Icons.Filled.Search),
     TabSpec(Screen.Settings, "设置", Icons.Outlined.Settings, Icons.Filled.Settings),
 )
 
@@ -107,7 +105,6 @@ fun StarpickNav(container: AppContainer) {
     val discoverState = remember { DiscoverUiState() }
     val homeState = remember { HomeUiState() }
     val searchState = remember { SearchUiState() }
-    val doubanSearchState = remember { DoubanSearchUiState() }
     // 探活结果跟着导航层活：切到别处再回来还是上次的结论，不会自己又跑一遍。
     val sourceHealthState = remember { SourceHealthUiState() }
     val current = stack.last()
@@ -159,11 +156,14 @@ fun StarpickNav(container: AppContainer) {
             onBack = pop,
         )
 
-        is Screen.DiscoverSearch -> DiscoverSearchScreen(
+        is Screen.Search -> SearchScreen(
             container = container,
-            state = doubanSearchState,
-            // 与首页海报同一条路径：拿豆瓣片名去用户的源里解析，命中后直接换成详情页。
-            onPick = { title -> stack.add(Screen.Resolving(title)) },
+            state = searchState,
+            // 豆瓣条目没有可直接播的源，先拿片名去用户的源里解析，命中后换成详情页。
+            onOpenDouban = { title -> stack.add(Screen.Resolving(title)) },
+            // 视频源条目本身带播放地址，直接进详情，由用户挑源和选集。
+            onOpenSource = { group -> stack.add(Screen.Detail(group)) },
+            onOpenSettings = { goTab(Screen.Settings) },
             onBack = pop,
         )
 
@@ -202,8 +202,8 @@ fun StarpickNav(container: AppContainer) {
                                     ),
                                 )
                             },
-                            // 顶栏搜索图标 → 独立的豆瓣搜索页；底部「搜索」tab 保持搜采集源。
-                            onOpenSearch = { stack.add(Screen.DiscoverSearch) },
+                            // 搜索是首页顶栏的唯一入口，收在二级页，不占底部 tab。
+                            onOpenSearch = { stack.add(Screen.Search) },
                             onOpenSettings = { goTab(Screen.Settings) },
                         )
 
@@ -227,13 +227,6 @@ fun StarpickNav(container: AppContainer) {
                                     ),
                                 )
                             },
-                            onOpenSettings = { goTab(Screen.Settings) },
-                        )
-
-                        Screen.Search -> SearchScreen(
-                            container = container,
-                            state = searchState,
-                            onOpen = { stack.add(Screen.Detail(it)) },
                             onOpenSettings = { goTab(Screen.Settings) },
                         )
 

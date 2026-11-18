@@ -22,15 +22,22 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SecondaryTabRow
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -39,9 +46,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusManager
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.starpick.app.AppContainer
@@ -58,12 +66,22 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/** 一个搜索框同时查两类结果，用 tab 分开看。 */
+enum class SearchTab(val label: String) {
+    All("全部"),
+    Douban("豆瓣"),
+    Sources("视频源"),
+}
+
+/** 搜索页「全部」里每类先给几条，想看全的进对应 tab。 */
+private const val PREVIEW_DOUAN = 3
+private const val PREVIEW_SOURCES = 5
+
 /**
- * 搜索页 UI 状态，由导航层持有。
+ * 统一搜索页状态，由导航层持有：进详情再返回、切页回来都保留关键词、结果和滚动位置。
  *
- * 为什么不 remember 在页面里：进详情再返回、切 tab 再切回都会让本页 Composable 重建，
- * 页面内的 remember 全丢，用户就得重新搜一遍。放在导航层后：
- * 进来默认显示上一次的结果，只有下拉才重新请求。
+ * 豆瓣（片库，规范）和视频源（用户的采集站）同一次提交并发查询，谁先回来先显示谁。
+ * 两者都不再是独立页面，只是结果的两个维度。
  */
 class SearchUiState {
     /** 输入框里的原始文本。 */
@@ -71,44 +89,64 @@ class SearchUiState {
 
     /** 已提交的关键词；空串表示还没搜过。 */
     var keyword by mutableStateOf("")
-    var outcome by mutableStateOf<SearchOutcome?>(null)
-    var elapsed by mutableLongStateOf(0L)
-    var loading by mutableStateOf(false)
+    var tab by mutableStateOf(SearchTab.All)
+
+    var doubanResults by mutableStateOf<List<DoubanSubject>>(emptyList())
+    var doubanLoading by mutableStateOf(false)
+
+    var sourceOutcome by mutableStateOf<SearchOutcome?>(null)
+    var sourceLoading by mutableStateOf(false)
+    var sourceLoadingMore by mutableStateOf(false)
+    /** 当前已加载到的页码；下一页返回空才停止翻。 */
+    var sourcePage by mutableIntStateOf(1)
+    var sourceHasMore by mutableStateOf(false)
+
     var refreshing by mutableStateOf(false)
 
-    /** 空态兜底的豆瓣热搜，只在首次进入拉一次。 */
+    /** 空态兜底的豆瓣热搜，只拉一次。 */
     var hot by mutableStateOf<List<DoubanSubject>>(emptyList())
     var hotLoaded by mutableStateOf(false)
     var hotLoading by mutableStateOf(false)
 
-    val listState = LazyListState()
+    val listStates = SearchTab.entries.associateWith { LazyListState() }
+    fun listState(tab: SearchTab): LazyListState = listStates.getValue(tab)
+
+    val loading: Boolean get() = doubanLoading || sourceLoading
+    val hasResult: Boolean get() = doubanResults.isNotEmpty() || sourceOutcome != null
 
     /** 有输入或结果时，返回键先清搜索而不是直接退出页面。 */
-    val hasSearch: Boolean get() = query.isNotEmpty() || keyword.isNotEmpty() || outcome != null
+    val hasSearch: Boolean get() = query.isNotEmpty() || keyword.isNotEmpty() || hasResult
 
     fun clearSearch() {
         query = ""
         keyword = ""
-        outcome = null
-        elapsed = 0L
-        loading = false
+        tab = SearchTab.All
+        doubanResults = emptyList()
+        doubanLoading = false
+        sourceOutcome = null
+        sourceLoading = false
+        sourceLoadingMore = false
+        sourcePage = 1
+        sourceHasMore = false
         refreshing = false
-        listState.requestScrollToItem(0)
+        listStates.values.forEach { it.requestScrollToItem(0) }
     }
 }
 
 /**
- * 搜索：输入 → 所有已启用源并发聚合 → **按片名去重**后一行一部。
+ * 统一搜索：一个关键词并发查豆瓣条目库和所有已启用的采集源，三个 tab 分维度展示。
  *
- * 不再按源分组罗列：同一个片名在 5 个源里各出一条，列表会瞬间膨胀成几十行，
- * 用户实际只关心「有没有这部片」。来源信息收进行内一行小字，换源交给详情页。
+ * 「全部」像微信搜索一样只给两类各几条预览，点「更多」进对应 tab 看完整结果；
+ * 视频源结果按 CMS 的 pg 参数逐页加载，不再一次性把整站拉出来。
  */
 @Composable
 fun SearchScreen(
     container: AppContainer,
     state: SearchUiState,
-    onOpen: (SearchGroup) -> Unit,
+    onOpenDouban: (String) -> Unit,
+    onOpenSource: (SearchGroup) -> Unit,
     onOpenSettings: () -> Unit,
+    onBack: () -> Unit,
 ) {
     val sources by container.store.sources.collectAsState()
     val history by container.store.searchHistory.collectAsState()
@@ -117,8 +155,8 @@ fun SearchScreen(
     val focusManager: FocusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
 
-    // 有搜索内容时，返回键只清空搜索，不退出页面；再按一次才轮到导航层处理退出。
     BackHandler(enabled = state.hasSearch) { state.clearSearch() }
+    val handleBack: () -> Unit = { if (state.hasSearch) state.clearSearch() else onBack() }
 
     val loadHot: (Boolean) -> Unit = { force ->
         if (!state.hotLoading && (force || !state.hotLoaded)) {
@@ -136,63 +174,116 @@ fun SearchScreen(
         }
     }
 
-    // 空态用豆瓣热门兜底：用户总能一键开始，而不是面对「请输入关键词」。
-    // 依赖「有没有源」而不是 Unit：用户中途去设置里加完源回来才会真正去拉。
-    LaunchedEffect(enabledSources.isNotEmpty()) {
-        if (enabledSources.isNotEmpty()) loadHot(false)
-    }
+    // 空态热搜只拉一次；用户中途去设置里加完源回来不需要重拉（热搜是豆瓣的，与源无关）。
+    LaunchedEffect(Unit) { loadHot(false) }
 
-    val runSearch: (String, Boolean) -> Unit = { raw, isRefresh ->
+    fun runSearch(raw: String, isRefresh: Boolean) {
         focusManager.clearFocus()
         keyboard?.hide()
         val keyword = raw.trim()
-        if (keyword.isNotEmpty() && enabledSources.isNotEmpty() && !state.loading) {
-            state.loading = true
-            state.refreshing = isRefresh
-            state.query = keyword
-            state.keyword = keyword
-            scope.launch {
+        if (keyword.isEmpty() || state.loading) return
+        state.query = keyword
+        state.keyword = keyword
+        state.refreshing = isRefresh
+        // 新搜索从第 1 页重来；下拉刷新保留在当前 tab 的滚动位置。
+        state.sourcePage = 1
+        state.sourceHasMore = false
+        state.doubanLoading = true
+        state.sourceLoading = true
+        scope.launch {
+            try {
+                container.store.addSearchHistory(keyword)
+            } catch (_: Exception) {
+                // 历史写失败不影响搜索本身。
+            }
+            launch {
                 try {
-                    container.store.addSearchHistory(keyword)
-                    val started = System.currentTimeMillis()
-                    val result = withContext(Dispatchers.IO) {
-                        container.aggregator.grouped(enabledSources, keyword)
+                    state.doubanResults = withContext(Dispatchers.IO) {
+                        container.douban.search(keyword)
                     }
-                    state.elapsed = System.currentTimeMillis() - started
-                    state.outcome = result
-                    // 新鲜的一次搜索回到顶部；下拉刷新保持在原位。
-                    if (!isRefresh) runCatching { state.listState.scrollToItem(0) }
                 } finally {
-                    state.loading = false
+                    state.doubanLoading = false
+                }
+            }
+            launch {
+                try {
+                    val result = withContext(Dispatchers.IO) {
+                        container.aggregator.grouped(enabledSources, keyword, 1)
+                    }
+                    state.sourceOutcome = result
+                    state.sourceHasMore = result.items.isNotEmpty()
+                } finally {
+                    state.sourceLoading = false
                     state.refreshing = false
                 }
             }
         }
     }
 
-    // 下拉：有搜索结果就重搜上一次的关键词，否则重拉豆瓣热搜。
+    val loadMore: () -> Unit = {
+        val keyword = state.keyword
+        if (keyword.isNotBlank() && enabledSources.isNotEmpty() &&
+            state.sourceHasMore && !state.sourceLoadingMore && !state.sourceLoading
+        ) {
+            state.sourceLoadingMore = true
+            scope.launch {
+                try {
+                    val nextPage = state.sourcePage + 1
+                    val page = withContext(Dispatchers.IO) {
+                        container.aggregator.grouped(enabledSources, keyword, nextPage)
+                    }
+                    state.sourcePage = nextPage
+                    state.sourceHasMore = page.items.isNotEmpty()
+                    state.sourceOutcome = state.sourceOutcome?.let { current ->
+                        container.aggregator.merge(listOf(current, page))
+                    } ?: page
+                } finally {
+                    state.sourceLoadingMore = false
+                }
+            }
+        }
+    }
+
     val refresh: () -> Unit = {
         if (state.keyword.isNotEmpty()) runSearch(state.keyword, true) else loadHot(true)
     }
 
     Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
-        SearchBar(
-            query = state.query,
-            placeholder = "搜索片名 / 演员",
-            onQueryChange = { state.query = it },
-            onSearch = { runSearch(state.query, false) },
-            onClear = { state.clearSearch() },
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
-        )
-
-        if (enabledSources.isEmpty()) {
-            EmptyState(
-                title = "还没有可用的采集源",
-                description = "添加一个苹果 CMS V10 站点后才能搜索",
-                actionLabel = "去添加采集源",
-                onAction = onOpenSettings,
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(start = 4.dp, end = 20.dp, top = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = handleBack) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "返回",
+                    tint = Ink.Text1,
+                )
+            }
+            SearchBar(
+                query = state.query,
+                placeholder = "搜索片名 / 演员",
+                onQueryChange = { state.query = it },
+                onSearch = { runSearch(state.query, false) },
+                onClear = { state.clearSearch() },
+                modifier = Modifier.weight(1f),
             )
-            return@Column
+        }
+
+        SecondaryTabRow(
+            selectedTabIndex = state.tab.ordinal,
+            containerColor = Ink.Base,
+            contentColor = Accent.Brand,
+            divider = {},
+        ) {
+            SearchTab.entries.forEachIndexed { index, tab ->
+                Tab(
+                    selected = state.tab == tab,
+                    onClick = { state.tab = tab },
+                    text = { Text(tab.label) },
+                    unselectedContentColor = Ink.Text3,
+                )
+            }
         }
 
         PullToRefreshBox(
@@ -200,127 +291,339 @@ fun SearchScreen(
             onRefresh = refresh,
             modifier = Modifier.weight(1f),
         ) {
-            val result = state.outcome
-            when {
-                // 下拉刷新时保留旧结果，只让顶部指示器转，别把列表抽走。
-                state.loading && !state.refreshing -> {
-                    Column(Modifier.fillMaxWidth().padding(top = 24.dp)) {
-                        LinearProgressIndicator(
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
-                            color = Accent.Brand,
-                            trackColor = Ink.Line,
-                        )
-                        Spacer(Modifier.height(16.dp))
-                        Text(
-                            text = "正在聚合 ${enabledSources.size} 个源…",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = Ink.Text2,
-                            modifier = Modifier.padding(horizontal = 20.dp),
-                        )
-                    }
-                }
+            if (state.keyword.isEmpty()) {
+                EntryState(
+                    state = state,
+                    history = history,
+                    sourceCount = enabledSources.size,
+                    scope = scope,
+                    container = container,
+                    onHistory = { runSearch(it, false) },
+                )
+                return@PullToRefreshBox
+            }
 
-                result != null && result.groups.isEmpty() -> {
-                    LazyColumn(state = state.listState) {
-                        item {
-                            EmptyState(
-                                title = "没找到这部片",
-                                description = buildString {
-                                    append("换一个更短的关键词试试")
-                                    if (result.failedSources.isNotEmpty()) {
-                                        append(" · ${result.failedSources.joinToString("、")} 超时")
-                                    }
-                                },
-                                actionLabel = "换个关键词",
-                                onAction = {
-                                    state.query = ""
-                                    state.keyword = ""
-                                    state.outcome = null
-                                },
-                            )
-                        }
-                    }
-                }
+            when (state.tab) {
+                SearchTab.All -> AllResults(
+                    state = state,
+                    sourceCount = enabledSources.size,
+                    onTab = { state.tab = it },
+                    onOpenDouban = onOpenDouban,
+                    onOpenSource = onOpenSource,
+                    onReset = { state.clearSearch() },
+                )
 
-                result != null -> {
-                    ResultList(
-                        groups = result.groups,
-                        sourceCount = enabledSources.size,
-                        elapsed = state.elapsed,
-                        failedSources = result.failedSources,
-                        listState = state.listState,
-                        onOpen = onOpen,
+                SearchTab.Douban -> DoubanResults(
+                    state = state,
+                    onOpen = onOpenDouban,
+                    onReset = { state.clearSearch() },
+                )
+
+                SearchTab.Sources -> SourceResults(
+                    state = state,
+                    enabledSources = enabledSources,
+                    onOpen = onOpenSource,
+                    onOpenSettings = onOpenSettings,
+                    onLoadMore = loadMore,
+                    onReset = { state.clearSearch() },
+                )
+            }
+        }
+    }
+}
+
+/** 未搜索：历史 + 豆瓣热门，点一下直接发起统一搜索。 */
+@Composable
+private fun EntryState(
+    state: SearchUiState,
+    history: List<String>,
+    sourceCount: Int,
+    scope: kotlinx.coroutines.CoroutineScope,
+    container: AppContainer,
+    onHistory: (String) -> Unit,
+) {
+    LazyColumn(
+        state = state.listState(SearchTab.All),
+        contentPadding = PaddingValues(bottom = 12.dp),
+    ) {
+        if (history.isNotEmpty()) {
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("搜索历史", style = MaterialTheme.typography.titleSmall, color = Ink.Text1)
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        text = "清空",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Ink.Text3,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { scope.launch { container.store.clearSearchHistory() } }
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
                     )
                 }
+            }
+            item {
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    history.forEach { keyword ->
+                        HistoryChip(text = keyword) { onHistory(keyword) }
+                    }
+                }
+            }
+        }
 
-                else -> {
-                    // 初始态：搜索历史（有才显示）+ 豆瓣热门前 5，点一下就能搜。
-                    LazyColumn(
-                        state = state.listState,
-                        contentPadding = PaddingValues(bottom = 12.dp),
-                    ) {
-                        if (history.isNotEmpty()) {
-                            item {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 2.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Text(
-                                        text = "搜索历史",
-                                        style = MaterialTheme.typography.titleSmall,
-                                        color = Ink.Text1,
-                                    )
-                                    Spacer(Modifier.weight(1f))
-                                    Text(
-                                        text = "清空",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = Ink.Text3,
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .clickable {
-                                                scope.launch { container.store.clearSearchHistory() }
-                                            }
-                                            .padding(horizontal = 8.dp, vertical = 4.dp),
-                                    )
-                                }
+        item { SectionHeader(title = "大家都在搜", trailing = "豆瓣热门") }
+        items(state.hot, key = { "hot-" + it.id }) { subject ->
+            SubjectRow(subject = subject, onClick = { onHistory(subject.title) })
+        }
+        item {
+            Text(
+                text = "搜索会同时查豆瓣片库和你的 $sourceCount 个采集源",
+                style = MaterialTheme.typography.labelSmall,
+                color = Ink.Text3,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 20.dp),
+            )
+        }
+    }
+}
+
+/** 微信式「全部」：两类各给几条，点更多进对应 tab。 */
+@Composable
+private fun AllResults(
+    state: SearchUiState,
+    sourceCount: Int,
+    onTab: (SearchTab) -> Unit,
+    onOpenDouban: (String) -> Unit,
+    onOpenSource: (SearchGroup) -> Unit,
+    onReset: () -> Unit,
+) {
+    val groups = state.sourceOutcome?.groups.orEmpty()
+    LazyColumn(
+        state = state.listState(SearchTab.All),
+        contentPadding = PaddingValues(bottom = 12.dp),
+    ) {
+        if (state.loading && state.doubanResults.isEmpty() && groups.isEmpty()) {
+            item {
+                LinearProgressIndicator(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
+                    color = Accent.Brand,
+                    trackColor = Ink.Line,
+                )
+            }
+        }
+
+        if (state.doubanResults.isNotEmpty()) {
+            item {
+                PreviewHeader(title = "豆瓣影视", count = state.doubanResults.size) {
+                    onTab(SearchTab.Douban)
+                }
+            }
+            items(state.doubanResults.take(PREVIEW_DOUAN), key = { "all-douban-" + it.id }) { subject ->
+                SubjectRow(subject = subject, onClick = { onOpenDouban(subject.title) })
+            }
+        }
+
+        if (groups.isNotEmpty()) {
+            item {
+                PreviewHeader(title = "视频源", count = groups.size) { onTab(SearchTab.Sources) }
+            }
+            items(groups.take(PREVIEW_SOURCES), key = { "all-source-" + it.items.first().key }) { group ->
+                GroupRow(group = group, onClick = { onOpenSource(group) })
+            }
+        }
+
+        if (!state.loading && state.doubanResults.isEmpty() && groups.isEmpty()) {
+            item {
+                EmptyState(
+                    title = "没找到相关结果",
+                    description = "试试更短的关键词，或换个片名",
+                    actionLabel = "换个关键词",
+                    onAction = onReset,
+                )
+            }
+        }
+
+        if (state.doubanResults.isNotEmpty() || groups.isNotEmpty()) {
+            item {
+                Text(
+                    text = buildString {
+                        append("豆瓣 ${state.doubanResults.size} 条")
+                        append(" · 视频源 ${groups.size} 部 / $sourceCount 个源")
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Ink.Text3,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 18.dp),
+                )
+            }
+        }
+    }
+}
+
+/** 豆瓣 tab：完整 suggest 结果（该接口一次返回一批，不分页）。 */
+@Composable
+private fun DoubanResults(
+    state: SearchUiState,
+    onOpen: (String) -> Unit,
+    onReset: () -> Unit,
+) {
+    when {
+        state.doubanLoading && state.doubanResults.isEmpty() -> {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+                CircularProgressIndicator(
+                    color = Accent.Brand,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.padding(top = 40.dp).size(24.dp),
+                )
+            }
+        }
+
+        state.doubanResults.isEmpty() -> {
+            LazyColumn(state = state.listState(SearchTab.Douban)) {
+                item {
+                    EmptyState(
+                        title = "豆瓣没搜到",
+                        description = "换个片名试试，或去「视频源」tab 直接找资源",
+                        actionLabel = "清空",
+                        onAction = onReset,
+                    )
+                }
+            }
+        }
+
+        else -> LazyColumn(
+            state = state.listState(SearchTab.Douban),
+            contentPadding = PaddingValues(bottom = 12.dp),
+        ) {
+            item {
+                Text(
+                    text = "豆瓣找到 ${state.doubanResults.size} 部 · 点一部去你的源里找资源",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Ink.Text3,
+                    modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 4.dp),
+                )
+            }
+            items(state.doubanResults, key = { it.id + it.title }) { subject ->
+                SubjectRow(subject = subject, onClick = { onOpen(subject.title) })
+            }
+        }
+    }
+}
+
+/** 视频源 tab：按 CMS 的 pg 逐页加载，空页为止。 */
+@Composable
+private fun SourceResults(
+    state: SearchUiState,
+    enabledSources: List<com.starpick.app.core.model.SourceSite>,
+    onOpen: (SearchGroup) -> Unit,
+    onOpenSettings: () -> Unit,
+    onLoadMore: () -> Unit,
+    onReset: () -> Unit,
+) {
+    when {
+        enabledSources.isEmpty() -> {
+            EmptyState(
+                title = "还没有可用的采集源",
+                description = "添加一个苹果 CMS V10 站点后才能搜片源，豆瓣搜索不受影响",
+                actionLabel = "去添加采集源",
+                onAction = onOpenSettings,
+            )
+        }
+
+        state.sourceLoading && state.sourceOutcome == null -> {
+            Column(Modifier.fillMaxWidth().padding(top = 24.dp)) {
+                LinearProgressIndicator(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                    color = Accent.Brand,
+                    trackColor = Ink.Line,
+                )
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    text = "正在聚合 ${enabledSources.size} 个源…",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Ink.Text2,
+                    modifier = Modifier.padding(horizontal = 20.dp),
+                )
+            }
+        }
+
+        state.sourceOutcome?.groups.isNullOrEmpty() && !state.sourceLoading -> {
+            LazyColumn(state = state.listState(SearchTab.Sources)) {
+                item {
+                    EmptyState(
+                        title = "没找到这部片",
+                        description = "换一个更短的关键词试试",
+                        actionLabel = "换个关键词",
+                        onAction = onReset,
+                    )
+                }
+            }
+        }
+
+        else -> {
+            val outcome = state.sourceOutcome ?: return
+            val groups = outcome.groups
+            LazyColumn(
+                state = state.listState(SearchTab.Sources),
+                contentPadding = PaddingValues(bottom = 12.dp),
+            ) {
+                item {
+                    Text(
+                        text = buildString {
+                            append("找到 ${groups.size} 部 · ${enabledSources.size} 个源")
+                            append(" · 第 ${state.sourcePage} 页")
+                            if (outcome.failedSources.isNotEmpty()) {
+                                append(" · ${outcome.failedSources.size} 个源超时")
                             }
-                            item {
-                                FlowRow(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 20.dp, vertical = 6.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                                ) {
-                                    history.forEach { keyword ->
-                                        HistoryChip(text = keyword) {
-                                            state.query = keyword
-                                            runSearch(keyword, false)
-                                        }
-                                    }
-                                }
-                            }
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Ink.Text3,
+                        modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 4.dp),
+                    )
+                }
+                items(groups, key = { it.title + it.items.first().key }) { group ->
+                    GroupRow(group = group, onClick = { onOpen(group) })
+                }
+                item {
+                    when {
+                        state.sourceLoadingMore -> {
+                            LinearProgressIndicator(
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 18.dp),
+                                color = Accent.Brand,
+                                trackColor = Ink.Line,
+                            )
                         }
 
-                        item { SectionHeader(title = "大家都在搜", trailing = "豆瓣热门") }
-                        items(state.hot, key = { it.id }) { s ->
-                            HotRow(
-                                index = state.hot.indexOf(s),
-                                title = s.title,
-                                rate = s.rate,
+                        state.sourceHasMore -> {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 20.dp, vertical = 16.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Ink.Card)
+                                    .border(1.dp, Ink.Line, RoundedCornerShape(12.dp))
+                                    .clickable(onClick = onLoadMore)
+                                    .padding(vertical = 13.dp),
+                                contentAlignment = Alignment.Center,
                             ) {
-                                state.query = s.title
-                                runSearch(s.title, false)
+                                Text("加载更多", style = MaterialTheme.typography.labelLarge, color = Accent.Brand)
                             }
                         }
-                        item {
+
+                        groups.isNotEmpty() -> {
                             Text(
-                                text = "搜索会在你已启用的 ${enabledSources.size} 个采集源里同时进行",
+                                text = "已经到底了",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = Ink.Text3,
-                                modifier = Modifier.padding(horizontal = 20.dp, vertical = 20.dp),
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 18.dp),
+                                textAlign = TextAlign.Center,
                             )
                         }
                     }
@@ -330,44 +633,77 @@ fun SearchScreen(
     }
 }
 
-/**
- * 结果列表：一部片一行。
- *
- * 行内三行字分别是「片名 / 年份+更新信息 / 有哪些源提供」，把原来按源分组导致的
- * 重复条目压成一条，多源时列表长度直接降到 1/N。
- */
 @Composable
-private fun ResultList(
-    groups: List<SearchGroup>,
-    sourceCount: Int,
-    elapsed: Long,
-    failedSources: List<String>,
-    listState: LazyListState,
-    onOpen: (SearchGroup) -> Unit,
-) {
-    LazyColumn(
-        state = listState,
-        contentPadding = PaddingValues(bottom = 12.dp),
+private fun PreviewHeader(title: String, count: Int, onMore: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        item {
+        Text(text = title, style = MaterialTheme.typography.titleSmall, color = Ink.Text1)
+        Spacer(Modifier.width(6.dp))
+        Text(text = "$count", style = MaterialTheme.typography.labelSmall, color = Ink.Text3)
+        Spacer(Modifier.weight(1f))
+        Text(
+            text = "更多 ›",
+            style = MaterialTheme.typography.labelMedium,
+            color = Accent.Brand,
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .clickable(onClick = onMore)
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+        )
+    }
+}
+
+/** 豆瓣条目行：海报 + 片名 + 年份/原名，右侧提示「去源里找」。 */
+@Composable
+private fun SubjectRow(subject: DoubanSubject, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        VodCover(
+            title = subject.title,
+            cover = subject.cover,
+            modifier = Modifier.size(width = 44.dp, height = 62.dp),
+            shape = RoundedCornerShape(7.dp),
+        )
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
             Text(
-                text = buildString {
-                    append("找到 ${groups.size} 部")
-                    append(" · $sourceCount 个源")
-                    append(" · ${"%.1f".format(elapsed / 1000.0)} 秒")
-                    if (failedSources.isNotEmpty()) append(" · ${failedSources.size} 个源超时")
-                },
-                style = MaterialTheme.typography.labelMedium,
-                color = Ink.Text3,
-                modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 4.dp),
+                text = subject.title,
+                style = MaterialTheme.typography.titleSmall,
+                color = Ink.Text1,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
+            if (subject.episodesInfo.isNotBlank()) {
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    text = subject.episodesInfo,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Ink.Text3,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
-        items(groups, key = { it.title + it.items.first().key }) { group ->
-            GroupRow(group = group, onClick = { onOpen(group) })
+        Spacer(Modifier.width(10.dp))
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .border(1.dp, Ink.Line, RoundedCornerShape(8.dp))
+                .padding(horizontal = 10.dp, vertical = 5.dp),
+        ) {
+            Text("找资源", style = MaterialTheme.typography.labelSmall, color = Ink.Text2)
         }
     }
 }
 
+/** 视频源结果：同片名聚成一行，来源小字放行内。 */
 @Composable
 private fun GroupRow(group: SearchGroup, onClick: () -> Unit) {
     val head = group.items.first()
@@ -427,37 +763,6 @@ private fun GroupRow(group: SearchGroup, onClick: () -> Unit) {
                 color = Accent.Brand,
             )
         }
-    }
-}
-
-@Composable
-private fun HotRow(index: Int, title: String, rate: String, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 11.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = (index + 1).toString(),
-            style = MaterialTheme.typography.labelLarge,
-            color = if (index < 3) Accent.Gold else Ink.Text3,
-            modifier = Modifier.width(22.dp),
-        )
-        Text(
-            text = title,
-            style = MaterialTheme.typography.bodyLarge,
-            color = Ink.Text1,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
-        )
-        Text(
-            text = if (rate.isNotBlank()) "豆瓣 $rate" else "",
-            style = MaterialTheme.typography.labelSmall,
-            color = Ink.Text3,
-        )
     }
 }
 
