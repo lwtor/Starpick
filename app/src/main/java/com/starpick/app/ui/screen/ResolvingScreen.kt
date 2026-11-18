@@ -29,6 +29,9 @@ import androidx.compose.ui.unit.dp
 import com.starpick.app.AppContainer
 import com.starpick.app.core.model.SearchGroup
 import com.starpick.app.core.model.VodItem
+import com.starpick.app.core.model.coreNameOf
+import com.starpick.app.core.model.titleMatches
+import com.starpick.app.core.model.titleMatchScore
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.mapNotNull
 
@@ -57,9 +60,11 @@ fun ResolvingScreen(
             return@LaunchedEffect
         }
         state = ResolveState.Loading
-        // 拿到第一个命中的源就进详情，不再等齐所有源。
-        val best = container.aggregator.progressive(enabled, title)
-            .mapNotNull { outcome -> pickGroup(outcome.groups.orEmpty()) }
+        // 用核心片名去搜：带「第一季」这类后缀时采集站常模糊匹配到不相干的片子。
+        // 拿到第一个「标题确实匹配」的源才进详情，不再等齐所有源。
+        val keyword = coreNameOf(title).ifBlank { title }
+        val best = container.aggregator.progressive(enabled, keyword)
+            .mapNotNull { outcome -> pickGroup(outcome.groups.orEmpty(), title) }
             .firstOrNull()
         state = if (best != null) ResolveState.Done(best) else ResolveState.NotFound
     }
@@ -132,16 +137,32 @@ fun ResolvingScreen(
 }
 
 /**
- * 从一批分组里挑出要展示的那一组：优先包含 [preferred] 那个源的组（避免同名不同片
- * 串到别的条目上），否则取源最多的一组。
+ * 从一批分组里挑出与 [expected] 同一部片的一组。
+ *
+ * 采集站搜索是模糊的，不校验标题就会把「越狱二人组[电影解说]」当成「越狱兔」。
+ * 先按核心片名过滤掉不相关的组，再综合匹配质量与源数量择优；
+ * [preferred] 是详情页已知的当前条目，命中时优先保留，避免换源时把正在播的顶掉。
  */
-internal fun pickGroup(groups: List<SearchGroup>, preferred: VodItem? = null): SearchGroup? {
+internal fun pickGroup(
+    groups: List<SearchGroup>,
+    expected: String,
+    preferred: VodItem? = null,
+): SearchGroup? {
+    val related = groups.filter { group ->
+        group.items.any { titleMatches(expected, it.title) }
+    }
+    if (related.isEmpty()) return null
     val matched = preferred?.let { fb ->
-        groups.firstOrNull { group ->
+        related.firstOrNull { group ->
             group.items.any { it.sourceId == fb.sourceId && it.vodId == fb.vodId }
         }
     }
-    return matched ?: groups.maxByOrNull { it.items.size }
+    if (matched != null) return matched
+    // 先按匹配质量（含季号吻合），同源数打平时取匹配更好的；质量相同再比源数量。
+    return related.maxWith(
+        compareBy<SearchGroup> { group -> group.items.maxOf { titleMatchScore(expected, it.title) } }
+            .thenBy { it.items.size },
+    )
 }
 
 private sealed interface ResolveState {

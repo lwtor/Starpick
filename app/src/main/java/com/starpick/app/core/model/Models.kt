@@ -87,6 +87,59 @@ fun historyKeyOf(title: String): String {
     return key.ifBlank { base }
 }
 
+/**
+ * 跨源匹配相关工具：豆瓣条目 → 采集源结果时必须确认是同一部片。
+ *
+ * 采集站搜索是模糊匹配，搜「越狱兔」会连带返回「越狱二人组[电影解说]」这类
+ * 只是名字沾边的条目。若只按「哪个组源最多」挑，就会张冠李戴。所以先归一到
+ * 核心片名（去版本标注 / 季号 / 集数 / 年份），再做包含判断。
+ */
+
+/** 方括号里的版本标注不属于片名主体，如「[电影解说]」「（2024）」。 */
+private val TITLE_BRACKET = Regex("[\\[【(（][^\\]】)）]*[\\]】)）]")
+private val TITLE_YEAR = Regex("(?:19|20)[0-9]{2}")
+private val SEASON_WORD = Regex(
+    "第[0-9零〇一二两三四五六七八九十]{1,4}季|season[ ]*[0-9]{1,2}",
+    RegexOption.IGNORE_CASE,
+)
+
+/** 取季号，中文「第一季」和英文「Season 2」都认；没有季号返回 null。 */
+private fun seasonNumberOf(title: String): Int? {
+    val raw = SEASON_WORD.find(title)?.value ?: return null
+    Regex("[0-9]+").find(raw)?.value?.toIntOrNull()?.let { return it }
+    return cnSeasonNumber(raw.removePrefix("第").removeSuffix("季")).takeIf { it > 0 }
+}
+
+/** 核心片名：去版本标注、季号、集数、年份与标点，供跨源比对。 */
+fun coreNameOf(title: String): String {
+    var s = title.lowercase().replace(TITLE_BRACKET, "")
+    s = s.replace(SEASON_WORD, "").replace(TITLE_YEAR, "").replace(TITLE_NOISE, "")
+    repeat(2) { s = s.replace(EPISODE_TAIL, "") }
+    return s
+}
+
+/** 豆瓣条目与源站结果是否可能指向同一部片（核心名相等或一方包含另一方）。 */
+fun titleMatches(expected: String, candidate: String): Boolean {
+    val a = coreNameOf(expected)
+    val b = coreNameOf(candidate)
+    if (a.isEmpty() || b.isEmpty()) return false
+    if (a.length < 2 || b.length < 2) return a == b
+    return a == b || a in b || b in a
+}
+
+/** 匹配质量打分：核心完全一致 > 包含；季号吻合额外加分。用于同系列多季时择优。 */
+fun titleMatchScore(expected: String, candidate: String): Int {
+    val a = coreNameOf(expected)
+    val b = coreNameOf(candidate)
+    val base = when {
+        a == b -> 4
+        a in b || b in a -> 1
+        else -> return 0
+    }
+    val expectedSeason = seasonNumberOf(expected)
+    return if (expectedSeason != null && expectedSeason == seasonNumberOf(candidate)) base + 2 else base
+}
+
 data class Episode(val name: String, val url: String)
 
 data class PlayGroup(val from: String, val episodes: List<Episode>)

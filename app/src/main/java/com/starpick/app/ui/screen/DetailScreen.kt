@@ -62,6 +62,7 @@ import com.starpick.app.core.model.DoubanDetail
 import com.starpick.app.core.model.SearchGroup
 import com.starpick.app.core.model.VodItem
 import com.starpick.app.core.model.WatchProgress
+import com.starpick.app.core.model.coreNameOf
 import com.starpick.app.core.model.historyKeyOf
 import com.starpick.app.core.parser.PlaylistParser
 import com.starpick.app.ui.component.EmptyState
@@ -173,8 +174,10 @@ fun DetailScreen(
         val keyword = enrichTitle ?: return@LaunchedEffect
         val enabled = container.store.sources.value.filter { it.enabled }
         if (enabled.isEmpty()) return@LaunchedEffect
-        container.aggregator.progressive(enabled, keyword).collect { outcome ->
-            val target = pickGroup(outcome.groups.orEmpty(), selected) ?: return@collect
+        // 用核心片名补搜，避免带季号后缀时模糊命中不相干的片子。
+        val searchKey = coreNameOf(keyword).ifBlank { keyword }
+        container.aggregator.progressive(enabled, searchKey).collect { outcome ->
+            val target = pickGroup(outcome.groups.orEmpty(), keyword, selected) ?: return@collect
             if (target.items.size <= items.size) return@collect
             items = target.items
             // 当前源的字段可能被新结果补全（如封面/简介），值不同才换引用，
