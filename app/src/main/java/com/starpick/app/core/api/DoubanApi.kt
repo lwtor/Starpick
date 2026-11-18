@@ -5,6 +5,8 @@ import com.starpick.app.core.model.DoubanSubject
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
 import io.ktor.client.statement.bodyAsText
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -45,8 +47,12 @@ class DoubanApi(private val client: HttpClient) {
     /**
      * 关键词搜索豆瓣条目（独立搜索页用，只查豆瓣，不碰用户的采集源）。
      *
-     * 走 `j/subject_suggest` 公开接口：无需鉴权，返回里已带海报、年份、类型，
-     * 用户点一条之后才由导航层拿片名去自己的 CMS 源里找资源。
+     * 走 `j/subject_suggest` 公开接口：无需鉴权，返回里已带海报、年份、类型。
+     *
+     * 演员名特殊处理：suggest 对人名会返回一条 `type=celebrity`，这条原本被
+     * [VIDEO_TYPES] 过滤掉，导致「搜演员名字结果全空」。这里检测到 celebrity 后，
+     * 用该人名走 `j/search_subjects?tag=` 拉 TA 的影视作品，作为结果返回。
+     * 只对「suggest 命中了演员」的关键词走 tag，普通片名搜索行为不变。
      */
     suspend fun search(keyword: String): List<DoubanSubject> {
         val query = keyword.trim()
@@ -59,9 +65,61 @@ class DoubanApi(private val client: HttpClient) {
                     headers.append("Referer", "https://movie.douban.com/")
                 }
                 if (response.status.value !in 200..299) return@withTimeout emptyList()
-                parseSuggest(response.bodyAsText())
+                val body = response.bodyAsText()
+                val videos = parseSuggest(body)
+                // suggest 命中演员条目，且演员名就是（或基本就是）用户输入的关键词 →
+                // 认定用户在搜人名，优先返回 TA 的作品，忽略 suggest 里夹带的零散影视。
+                val actorName = firstCelebrityName(body)?.takeIf { name ->
+                    val q = normalize(query)
+                    val n = normalize(name)
+                    n == q || (q.length >= 2 && (n.contains(q) || q.contains(n)))
+                }
+                if (actorName != null) {
+                    val works = searchActorWorks(actorName)
+                    if (works.isNotEmpty()) return@withTimeout works
+                }
+                videos
             }
         }.getOrDefault(emptyList())
+    }
+
+    /**
+     * 按演员名查 TA 的影视作品：电影 + 剧集两路并发，任一失败不影响另一路。
+     * 走和热门榜同一个 `j/search_subjects` 公开 JSON，只是把 tag 换成演员名。
+     */
+    private suspend fun searchActorWorks(name: String): List<DoubanSubject> =
+        kotlinx.coroutines.coroutineScope {
+            val movie = async(kotlinx.coroutines.Dispatchers.IO) { subjectsByTag(name, "movie") }
+            val tv = async(kotlinx.coroutines.Dispatchers.IO) { subjectsByTag(name, "tv") }
+            (movie.await() + tv.await())
+                .distinctBy { it.id }
+                .sortedByDescending { it.rate.toDoubleOrNull() ?: 0.0 }
+        }
+
+    private suspend fun subjectsByTag(tag: String, type: String): List<DoubanSubject> = runCatching {
+        val response = client.get("https://movie.douban.com/j/search_subjects") {
+            url {
+                parameters.append("type", type)
+                parameters.append("tag", tag)
+                parameters.append("page_limit", "18")
+                parameters.append("page_start", "0")
+                parameters.append("sort", "recommend")
+            }
+            headers.append("User-Agent", USER_AGENT)
+            headers.append("Referer", "https://movie.douban.com/")
+        }
+        if (response.status.value !in 200..299) emptyList() else parse(response.bodyAsText())
+    }.getOrDefault(emptyList())
+
+    /** suggest 返回里第一条演员条目的显示名，用于拿去查 TA 的作品；没有则 null。 */
+    private fun firstCelebrityName(body: String): String? {
+        val array = runCatching { Json.parseToJsonElement(body) as? JsonArray }.getOrNull()
+            ?: return null
+        return array.firstNotNullOfOrNull { element ->
+            val obj = element as? JsonObject ?: return@firstNotNullOfOrNull null
+            val name = obj.str("title")
+            if (obj.str("type") == "celebrity" && name.isNotBlank()) name else null
+        }
     }
 
     /**

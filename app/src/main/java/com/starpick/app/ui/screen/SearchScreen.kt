@@ -1,6 +1,11 @@
 package com.starpick.app.ui.screen
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -24,10 +29,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SecondaryTabRow
 import androidx.compose.material3.Tab
@@ -188,6 +191,12 @@ fun SearchScreen(
         // 新搜索从第 1 页重来；下拉刷新保留在当前 tab 的滚动位置。
         state.sourcePage = 1
         state.sourceHasMore = false
+        // 换关键词才清空两路旧结果：否则「一路已返回、另一路还在搜」时会露出上一轮的旧数据。
+        // 下拉刷新（同一关键词）不清空，避免整页闪成空。
+        if (!isRefresh) {
+            state.doubanResults = emptyList()
+            state.sourceOutcome = null
+        }
         state.doubanLoading = true
         state.sourceLoading = true
         scope.launch {
@@ -270,19 +279,22 @@ fun SearchScreen(
             )
         }
 
-        SecondaryTabRow(
-            selectedTabIndex = state.tab.ordinal,
-            containerColor = Ink.Base,
-            contentColor = Accent.Brand,
-            divider = {},
-        ) {
-            SearchTab.entries.forEachIndexed { index, tab ->
-                Tab(
-                    selected = state.tab == tab,
-                    onClick = { state.tab = tab },
-                    text = { Text(tab.label) },
-                    unselectedContentColor = Ink.Text3,
-                )
+        // 未搜索时不显示分类 tab：此时页面只有历史和热门，出现「全部/豆瓣/视频源」反而误导。
+        if (state.keyword.isNotEmpty()) {
+            SecondaryTabRow(
+                selectedTabIndex = state.tab.ordinal,
+                containerColor = Ink.Base,
+                contentColor = Accent.Brand,
+                divider = {},
+            ) {
+                SearchTab.entries.forEachIndexed { index, tab ->
+                    Tab(
+                        selected = state.tab == tab,
+                        onClick = { state.tab = tab },
+                        text = { Text(tab.label) },
+                        unselectedContentColor = Ink.Text3,
+                    )
+                }
             }
         }
 
@@ -395,7 +407,7 @@ private fun EntryState(
     }
 }
 
-/** 微信式「全部」：两类各给几条，点更多进对应 tab。 */
+/** 微信式「全部」：两类各给几条，点更多进对应 tab；每路独立加载、谁先回来先显示。 */
 @Composable
 private fun AllResults(
     state: SearchUiState,
@@ -410,16 +422,7 @@ private fun AllResults(
         state = state.listState(SearchTab.All),
         contentPadding = PaddingValues(bottom = 12.dp),
     ) {
-        if (state.loading && state.doubanResults.isEmpty() && groups.isEmpty()) {
-            item {
-                LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
-                    color = Accent.Brand,
-                    trackColor = Ink.Line,
-                )
-            }
-        }
-
+        // 豆瓣分区：结果已到就显示，没到就只在这一块转圈，不挡另一路。
         if (state.doubanResults.isNotEmpty()) {
             item {
                 PreviewHeader(title = "豆瓣影视", count = state.doubanResults.size) {
@@ -429,8 +432,11 @@ private fun AllResults(
             items(state.doubanResults.take(PREVIEW_DOUAN), key = { "all-douban-" + it.id }) { subject ->
                 SubjectRow(subject = subject, onClick = { onOpenDouban(subject.title) })
             }
+        } else if (state.doubanLoading) {
+            item { SearchLoading("正在搜豆瓣片库…") }
         }
 
+        // 视频源分区：与豆瓣完全独立，先出结果的先显示，另一路继续 loading。
         if (groups.isNotEmpty()) {
             item {
                 PreviewHeader(title = "视频源", count = groups.size) { onTab(SearchTab.Sources) }
@@ -438,8 +444,11 @@ private fun AllResults(
             items(groups.take(PREVIEW_SOURCES), key = { "all-source-" + it.items.first().key }) { group ->
                 GroupRow(group = group, onClick = { onOpenSource(group) })
             }
+        } else if (state.sourceLoading) {
+            item { SearchLoading("正在搜 $sourceCount 个视频源…") }
         }
 
+        // 两路都结束且都没有结果，才给整页空态。
         if (!state.loading && state.doubanResults.isEmpty() && groups.isEmpty()) {
             item {
                 EmptyState(
@@ -457,6 +466,7 @@ private fun AllResults(
                     text = buildString {
                         append("豆瓣 ${state.doubanResults.size} 条")
                         append(" · 视频源 ${groups.size} 部 / $sourceCount 个源")
+                        if (state.doubanLoading || state.sourceLoading) append(" · 仍在搜索…")
                     },
                     style = MaterialTheme.typography.labelSmall,
                     color = Ink.Text3,
@@ -476,13 +486,7 @@ private fun DoubanResults(
 ) {
     when {
         state.doubanLoading && state.doubanResults.isEmpty() -> {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
-                CircularProgressIndicator(
-                    color = Accent.Brand,
-                    strokeWidth = 2.dp,
-                    modifier = Modifier.padding(top = 40.dp).size(24.dp),
-                )
-            }
+            SearchLoading("正在搜豆瓣片库…", modifier = Modifier.padding(top = 24.dp))
         }
 
         state.doubanResults.isEmpty() -> {
@@ -538,20 +542,7 @@ private fun SourceResults(
         }
 
         state.sourceLoading && state.sourceOutcome == null -> {
-            Column(Modifier.fillMaxWidth().padding(top = 24.dp)) {
-                LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
-                    color = Accent.Brand,
-                    trackColor = Ink.Line,
-                )
-                Spacer(Modifier.height(16.dp))
-                Text(
-                    text = "正在聚合 ${enabledSources.size} 个源…",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Ink.Text2,
-                    modifier = Modifier.padding(horizontal = 20.dp),
-                )
-            }
+            SearchLoading("正在搜 ${enabledSources.size} 个视频源…", modifier = Modifier.padding(top = 16.dp))
         }
 
         state.sourceOutcome?.groups.isNullOrEmpty() && !state.sourceLoading -> {
@@ -594,11 +585,7 @@ private fun SourceResults(
                 item {
                     when {
                         state.sourceLoadingMore -> {
-                            LinearProgressIndicator(
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 18.dp),
-                                color = Accent.Brand,
-                                trackColor = Ink.Line,
-                            )
+                            SearchLoading("正在加载更多…")
                         }
 
                         state.sourceHasMore -> {
@@ -763,6 +750,47 @@ private fun GroupRow(group: SearchGroup, onClick: () -> Unit) {
                 color = Accent.Brand,
             )
         }
+    }
+}
+
+/**
+ * 统一搜索 loading：三个依次呼吸的品牌蓝圆点 + 一行说明。
+ * 比裸进度条更轻、更聚焦，且同一时刻整页只出现一两处，视觉不吵。
+ */
+@Composable
+private fun SearchLoading(label: String, modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "search-loading")
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 22.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        repeat(3) { index ->
+            val alpha by transition.animateFloat(
+                initialValue = 0.25f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(durationMillis = 720, delayMillis = index * 160),
+                    repeatMode = RepeatMode.Reverse,
+                ),
+                label = "dot-$index",
+            )
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(Accent.Brand.copy(alpha = alpha)),
+            )
+            if (index < 2) Spacer(Modifier.width(6.dp))
+        }
+        Spacer(Modifier.width(12.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = Ink.Text2,
+        )
     }
 }
 
