@@ -35,6 +35,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import com.starpick.app.AppContainer
+import com.starpick.app.core.model.MatchAnchor
 import com.starpick.app.core.model.SearchGroup
 import com.starpick.app.core.model.VodItem
 import com.starpick.app.core.model.WatchProgress
@@ -71,17 +72,17 @@ sealed interface Screen {
     data object Search : Screen
 
     /**
-     * [enrichTitle] 非空时，详情页会按这个片名在后台补齐其余源。
+     * [enrichAnchor] 非空时，详情页会按这个锚点在后台补齐其余源。
      * 入口只带了一条记录（历史 / 收藏）或只等到第一个命中的源时用它。
      */
     data class Detail(
         val group: SearchGroup,
         val initialPlay: WatchProgress? = null,
-        val enrichTitle: String? = null,
+        val enrichAnchor: MatchAnchor? = null,
     ) : Screen
 
-    /** 只有豆瓣条目、手里还没有任何源时才需要：拿到第一个命中的源就换成详情页。 */
-    data class Resolving(val title: String) : Screen
+    /** 只有豆瓣条目、手里还没有任何源时才需要：拿到命中的源就换成详情页。 */
+    data class Resolving(val anchor: MatchAnchor) : Screen
 }
 
 private data class TabSpec(
@@ -140,18 +141,23 @@ fun StarpickNav(container: AppContainer) {
             container = container,
             group = current.group,
             initialPlay = current.initialPlay,
-            enrichTitle = current.enrichTitle,
+            enrichAnchor = current.enrichAnchor,
             onBack = pop,
+            onRematch = { anchor ->
+                // 重新匹配：用同一锚点回到解析页，重新在全源里择优（替换过渡页位置逻辑在这里不需要，
+                // 从详情压一个新的 Resolving，解析成功会再压一个 Detail，返回可回到原详情）。
+                stack.add(Screen.Resolving(anchor))
+            },
         )
 
         is Screen.Resolving -> ResolvingScreen(
             container = container,
-            title = current.title,
+            anchor = current.anchor,
             // 必须「替换」而不是「压栈」：过渡页只负责解析片名，解析完就不该留在返回栈里。
             // 之前是 add，导致详情页返回后回落到 Resolving，它又会重新解析并再次推开详情，
             // 表现出来就是「详情页返回不了」。
             onResolved = { group ->
-                stack[stack.lastIndex] = Screen.Detail(group, enrichTitle = current.title)
+                stack[stack.lastIndex] = Screen.Detail(group, enrichAnchor = current.anchor)
             },
             onBack = pop,
         )
@@ -159,8 +165,8 @@ fun StarpickNav(container: AppContainer) {
         is Screen.Search -> SearchScreen(
             container = container,
             state = searchState,
-            // 豆瓣条目没有可直接播的源，先拿片名去用户的源里解析，命中后换成详情页。
-            onOpenDouban = { title -> stack.add(Screen.Resolving(title)) },
+            // 豆瓣条目没有可直接播的源，带锚点（片名/年份/原名）去用户的源里解析。
+            onOpenDouban = { anchor -> stack.add(Screen.Resolving(anchor)) },
             // 视频源条目本身带播放地址，直接进详情，由用户挑源和选集。
             onOpenSource = { group -> stack.add(Screen.Detail(group)) },
             onOpenSettings = { goTab(Screen.Settings) },
@@ -190,7 +196,7 @@ fun StarpickNav(container: AppContainer) {
                         Screen.Discover -> DiscoverScreen(
                             container = container,
                             state = discoverState,
-                            onPick = { title -> stack.add(Screen.Resolving(title)) },
+                            onPick = { anchor -> stack.add(Screen.Resolving(anchor)) },
                             // 记录里已有可用条目，不必先等聚合：直接进详情，
                             // 其余源由详情页在后台补齐（enrichTitle）。
                             onResume = { item, record ->
@@ -198,7 +204,7 @@ fun StarpickNav(container: AppContainer) {
                                     Screen.Detail(
                                         group = SearchGroup(item.title, listOf(item)),
                                         initialPlay = record,
-                                        enrichTitle = item.title,
+                                        enrichAnchor = MatchAnchor(title = item.title, year = item.year),
                                     ),
                                 )
                             },
@@ -214,7 +220,7 @@ fun StarpickNav(container: AppContainer) {
                                 stack.add(
                                     Screen.Detail(
                                         group = SearchGroup(item.title, listOf(item)),
-                                        enrichTitle = item.title,
+                                        enrichAnchor = MatchAnchor(title = item.title, year = item.year),
                                     ),
                                 )
                             },
@@ -223,7 +229,7 @@ fun StarpickNav(container: AppContainer) {
                                     Screen.Detail(
                                         group = SearchGroup(item.title, listOf(item)),
                                         initialPlay = record,
-                                        enrichTitle = item.title,
+                                        enrichAnchor = MatchAnchor(title = item.title, year = item.year),
                                     ),
                                 )
                             },

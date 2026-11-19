@@ -104,7 +104,7 @@ private val SEASON_WORD = Regex(
 )
 
 /** 取季号，中文「第一季」和英文「Season 2」都认；没有季号返回 null。 */
-private fun seasonNumberOf(title: String): Int? {
+internal fun seasonNumberOf(title: String): Int? {
     val raw = SEASON_WORD.find(title)?.value ?: return null
     Regex("[0-9]+").find(raw)?.value?.toIntOrNull()?.let { return it }
     return cnSeasonNumber(raw.removePrefix("第").removeSuffix("季")).takeIf { it > 0 }
@@ -139,6 +139,65 @@ fun titleMatchScore(expected: String, candidate: String): Int {
     val expectedSeason = seasonNumberOf(expected)
     return if (expectedSeason != null && expectedSeason == seasonNumberOf(candidate)) base + 2 else base
 }
+
+// ------------------------------------------------ 跨源锚点匹配（豆瓣 → 采集源）
+
+/**
+ * 锚点与采集源条目的匹配评分。越高越可能是同一部片，0 表示根本不是。
+ *
+ * 相比裸片名比对，多了年份与季号两个硬否决：
+ *  - 年份：两边都拿到且相差超过 1 年 → 判为不同作品（翻拍 / 同名），直接 0。
+ *  - 季号：两边都明确且不等 → 判为不同季，直接 0（这是「第一季点进去第二季」的主因）。
+ * 片名核心名相等才给高分；单纯包含（一方是另一方子串）只给低分，避免「越狱兔」被
+ * 「越狱二人组」这类沾边条目抢走。原名命中作为额外加分。
+ */
+fun anchorMatchScore(anchor: MatchAnchor, item: VodItem): Int {
+    val a = anchor.title.let { coreNameOf(it) }
+        .ifBlank { return 0 }
+    val b = coreNameOf(item.title)
+    if (b.isEmpty()) return 0
+
+    // 年份硬否决：采集站 year 常是「2024」或「2024-01-01」，取前 4 位。
+    val ay = anchor.year.takeFirst4Digit()
+    val by = item.year.takeFirst4Digit()
+    if (ay != null && by != null && kotlin.math.abs(ay - by) > 1) return 0
+
+    // 季号硬否决：仅当两边都解析出季号且不等时否决。
+    val anchorSeason = anchor.season
+    val itemSeason = seasonNumberOf(item.title)
+    if (anchorSeason != null && itemSeason != null && anchorSeason != itemSeason) return 0
+
+    val nameScore = when {
+        a == b -> 6
+        a in b || b in a -> 2
+        else -> return 0
+    }
+    // 原名（外文名 / 别名）命中：采集站常用原名，豆瓣用译名时靠这个救回。
+    val original = coreNameOf(anchor.originalTitle)
+    val originalBonus = if (original.length >= 2 && (original == b || original in b || b in original)) 2 else 0
+    // 年份一致（非否决的情况下）小加分，年代表达模糊时不强求。
+    val yearBonus = if (ay != null && ay == by) 1 else 0
+    val seasonBonus = if (anchorSeason != null && anchorSeason == itemSeason) 1 else 0
+    return nameScore + originalBonus + yearBonus + seasonBonus
+}
+
+/** 是否「强命中」：可立即进详情，无需再等其余源。要求核心名完全相等且无硬冲突。 */
+fun isStrongAnchorMatch(anchor: MatchAnchor, item: VodItem): Boolean {
+    val a = coreNameOf(anchor.title)
+    val b = coreNameOf(item.title)
+    if (a.isEmpty() || a != b) return false
+    val ay = anchor.year.takeFirst4Digit()
+    val by = item.year.takeFirst4Digit()
+    if (ay != null && by != null && kotlin.math.abs(ay - by) > 1) return false
+    val anchorSeason = anchor.season
+    val itemSeason = seasonNumberOf(item.title)
+    if (anchorSeason != null && itemSeason != null && anchorSeason != itemSeason) return false
+    return true
+}
+
+/** 取字符串里第一个 4 位年份（19xx / 20xx），拿不到返回 null。 */
+private fun String.takeFirst4Digit(): Int? =
+    Regex("(?:19|20)[0-9]{2}").find(this)?.value?.toIntOrNull()
 
 data class Episode(val name: String, val url: String)
 

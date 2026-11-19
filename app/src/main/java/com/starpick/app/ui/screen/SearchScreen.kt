@@ -57,6 +57,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.starpick.app.AppContainer
 import com.starpick.app.core.model.DoubanSubject
+import com.starpick.app.core.model.MatchAnchor
 import com.starpick.app.core.model.SearchGroup
 import com.starpick.app.core.search.SearchOutcome
 import com.starpick.app.ui.component.EmptyState
@@ -146,7 +147,7 @@ class SearchUiState {
 fun SearchScreen(
     container: AppContainer,
     state: SearchUiState,
-    onOpenDouban: (String) -> Unit,
+    onOpenDouban: (MatchAnchor) -> Unit,
     onOpenSource: (SearchGroup) -> Unit,
     onOpenSettings: () -> Unit,
     onBack: () -> Unit,
@@ -413,7 +414,7 @@ private fun AllResults(
     state: SearchUiState,
     sourceCount: Int,
     onTab: (SearchTab) -> Unit,
-    onOpenDouban: (String) -> Unit,
+    onOpenDouban: (MatchAnchor) -> Unit,
     onOpenSource: (SearchGroup) -> Unit,
     onReset: () -> Unit,
 ) {
@@ -430,7 +431,7 @@ private fun AllResults(
                 }
             }
             items(state.doubanResults.take(PREVIEW_DOUAN), key = { "all-douban-" + it.id }) { subject ->
-                SubjectRow(subject = subject, onClick = { onOpenDouban(subject.title) })
+                SubjectRow(subject = subject, onClick = { onOpenDouban(MatchAnchor.from(subject)) })
             }
         } else if (state.doubanLoading) {
             item { SearchLoading("正在搜豆瓣片库…") }
@@ -481,7 +482,7 @@ private fun AllResults(
 @Composable
 private fun DoubanResults(
     state: SearchUiState,
-    onOpen: (String) -> Unit,
+    onOpen: (MatchAnchor) -> Unit,
     onReset: () -> Unit,
 ) {
     when {
@@ -515,7 +516,7 @@ private fun DoubanResults(
                 )
             }
             items(state.doubanResults, key = { it.id + it.title }) { subject ->
-                SubjectRow(subject = subject, onClick = { onOpen(subject.title) })
+                SubjectRow(subject = subject, onClick = { onOpen(MatchAnchor.from(subject)) })
             }
         }
     }

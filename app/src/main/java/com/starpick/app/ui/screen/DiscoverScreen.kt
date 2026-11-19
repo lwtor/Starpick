@@ -62,6 +62,7 @@ import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.starpick.app.AppContainer
 import com.starpick.app.core.model.DoubanSubject
+import com.starpick.app.core.model.MatchAnchor
 import com.starpick.app.core.model.VodItem
 import com.starpick.app.core.model.WatchProgress
 import com.starpick.app.ui.component.EmptyState
@@ -116,7 +117,7 @@ class DiscoverUiState {
 fun DiscoverScreen(
     container: AppContainer,
     state: DiscoverUiState,
-    onPick: (title: String) -> Unit,
+    onPick: (anchor: MatchAnchor) -> Unit,
     onResume: (VodItem, WatchProgress) -> Unit,
     onOpenSearch: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -263,7 +264,7 @@ fun DiscoverScreen(
                                 badge = if (s.isNew) "新" else null,
                                 subtitle = s.episodesInfo.takeIf { it.isNotBlank() },
                                 modifier = itemModifier,
-                                onClick = { onPick(s.title) },
+                                onClick = { onPick(MatchAnchor.from(s)) },
                             )
                         }
                     }
@@ -345,7 +346,7 @@ private fun RoundIcon(icon: ImageVector, description: String, enabled: Boolean, 
 
 /** Hero：整屏大图 + 底部渐变 + 片名/评分/主按钮，6 秒自动翻页。 */
 @Composable
-private fun HeroSection(subjects: List<DoubanSubject>, onPick: (String) -> Unit) {
+private fun HeroSection(subjects: List<DoubanSubject>, onPick: (MatchAnchor) -> Unit) {
     val pagerState = rememberPagerState(pageCount = { subjects.size })
 
     LaunchedEffect(subjects.size) {
@@ -364,7 +365,7 @@ private fun HeroSection(subjects: List<DoubanSubject>, onPick: (String) -> Unit)
             modifier = Modifier.fillMaxSize(),
         ) { page ->
             val subject = subjects[page]
-            Box(modifier = Modifier.fillMaxSize().clickable { onPick(subject.title) }) {
+            Box(modifier = Modifier.fillMaxSize().clickable { onPick(MatchAnchor.from(subject)) }) {
                 AsyncImage(
                     model = ImageRequest.Builder(LocalContext.current)
                         .data(subject.cover)
@@ -439,7 +440,7 @@ private fun HeroSection(subjects: List<DoubanSubject>, onPick: (String) -> Unit)
                     PrimaryButton(
                         text = "立即观看",
                         icon = Icons.Filled.PlayArrow,
-                        onClick = { onPick(subject.title) },
+                        onClick = { onPick(MatchAnchor.from(subject)) },
                     )
                 }
             }

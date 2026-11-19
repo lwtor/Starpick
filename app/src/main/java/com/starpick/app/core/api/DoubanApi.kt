@@ -235,6 +235,8 @@ class DoubanApi(private val client: HttpClient) {
                 url = obj.str("url"),
                 playable = false,
                 isNew = false,
+                year = obj.str("year"),
+                originalTitle = obj.str("sub_title").takeIf { it.isNotBlank() && it != title }.orEmpty(),
                 episodesInfo = listOfNotNull(
                     obj.str("year").takeIf { it.isNotBlank() },
                     obj.str("sub_title").takeIf { it.isNotBlank() && it != title },

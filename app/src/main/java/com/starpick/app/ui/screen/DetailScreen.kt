@@ -59,6 +59,7 @@ import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.starpick.app.AppContainer
 import com.starpick.app.core.model.DoubanDetail
+import com.starpick.app.core.model.MatchAnchor
 import com.starpick.app.core.model.SearchGroup
 import com.starpick.app.core.model.VodItem
 import com.starpick.app.core.model.WatchProgress
@@ -91,11 +92,13 @@ fun DetailScreen(
     group: SearchGroup,
     initialPlay: WatchProgress? = null,
     /**
-     * 非空时在后台按这个片名补齐其余源：入口只带了一条记录（历史 / 收藏）或只等到
+     * 非空时在后台按这个锚点补齐其余源：入口只带了一条记录（历史 / 收藏）或只等到
      * 第一个命中的源时，页面先开出来，剩下的源随后补进列表，不必干等好几秒。
      */
-    enrichTitle: String? = null,
+    enrichAnchor: MatchAnchor? = null,
     onBack: () -> Unit,
+    /** 串片纠错：用同一锚点重新在全源里择优。 */
+    onRematch: (MatchAnchor) -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val sources by container.store.sources.collectAsState()
@@ -170,14 +173,14 @@ fun DetailScreen(
 
     // 入口只带了一条记录（历史 / 收藏）或只等到第一个命中的源时，这里在后台把其余源补齐。
     // 只更新源列表，不动 selected / 线路 / 播放状态，避免补源时把正在看的进度重置。
-    LaunchedEffect(enrichTitle) {
-        val keyword = enrichTitle ?: return@LaunchedEffect
+    LaunchedEffect(enrichAnchor) {
+        val anchor = enrichAnchor ?: return@LaunchedEffect
         val enabled = container.store.sources.value.filter { it.enabled }
         if (enabled.isEmpty()) return@LaunchedEffect
         // 用核心片名补搜，避免带季号后缀时模糊命中不相干的片子。
-        val searchKey = coreNameOf(keyword).ifBlank { keyword }
+        val searchKey = coreNameOf(anchor.title).ifBlank { anchor.title }
         container.aggregator.progressive(enabled, searchKey).collect { outcome ->
-            val target = pickGroup(outcome.groups.orEmpty(), keyword, selected) ?: return@collect
+            val target = pickGroup(outcome.groups.orEmpty(), anchor, selected) ?: return@collect
             if (target.items.size <= items.size) return@collect
             items = target.items
             // 当前源的字段可能被新结果补全（如封面/简介），值不同才换引用，
@@ -425,6 +428,33 @@ fun DetailScreen(
                 }
 
                 // ── 底部：视频源及源相关信息。
+                // 串片纠错入口：标注这些源是按哪部豆瓣片匹配来的，不对可一键重选。
+                if (enrichAnchor != null && playing == null) {
+                    item {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 20.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = "源匹配自豆瓣《${enrichAnchor.title}》",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Ink.Text3,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Text(
+                                text = "重新匹配",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = Accent.Brand,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { onRematch(enrichAnchor) }
+                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                            )
+                        }
+                    }
+                }
                 item { SectionHeader(title = "视频源", trailing = "${items.size} 个") }
                 item {
                     Row(

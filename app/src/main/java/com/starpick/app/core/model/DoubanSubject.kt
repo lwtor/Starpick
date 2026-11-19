@@ -14,7 +14,37 @@ data class DoubanSubject(
     val playable: Boolean = false,
     val isNew: Boolean = false,
     val episodesInfo: String = "",
+    /** 首播年份（suggest 接口的 year / abstract 的 release_year），跨源匹配的硬约束之一。 */
+    val year: String = "",
+    /** 原名 / 外文名（suggest 的 sub_title），用于「 mock 与华语名并存」时补强匹配。 */
+    val originalTitle: String = "",
 )
+
+/**
+ * 跨源匹配锚点：把豆瓣条目的结构化信息带到采集源结果比对，判断「源里的这条是不是豆瓣这部」。
+ *
+ * 豆瓣与采集站之间没有可 join 的唯一 ID，只能做实体消歧。仅靠片名不够——采集站搜索是
+ * 模糊匹配，季号、年份、版本都可能对不上。这里把年份、季号、原名一并带上做多因子判定：
+ * 片名核心名决定相似基线，年份/季号作为硬否决，原名作为加分项。
+ *
+ * 纯 Kotlin，零 Android 依赖，将来可整体搬进 KMP 的 commonMain。
+ */
+data class MatchAnchor(
+    val title: String,
+    val year: String = "",
+    val originalTitle: String = "",
+) {
+    /** 季号从片名解析；解析不出表示「不知第几季」，比对时不据此否决。 */
+    val season: Int? = seasonNumberOf(title)
+
+    companion object {
+        fun from(subject: DoubanSubject) = MatchAnchor(
+            title = subject.title,
+            year = subject.year,
+            originalTitle = subject.originalTitle,
+        )
+    }
+}
 
 /**
  * 豆瓣影片详情。来自公开的 `j/subject_abstract`（评分 / 导演 / 演员 / 类型 / 地区 / 时长 / 短评）
