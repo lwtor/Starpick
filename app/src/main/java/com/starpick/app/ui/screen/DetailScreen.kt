@@ -63,7 +63,6 @@ import com.starpick.app.core.model.MatchAnchor
 import com.starpick.app.core.model.SearchGroup
 import com.starpick.app.core.model.VodItem
 import com.starpick.app.core.model.WatchProgress
-import com.starpick.app.core.model.coreNameOf
 import com.starpick.app.core.model.historyKeyOf
 import com.starpick.app.core.parser.PlaylistParser
 import com.starpick.app.ui.component.EmptyState
@@ -130,8 +129,15 @@ fun DetailScreen(
     var expanded by remember(group) { mutableStateOf(false) }
     var douban by remember(group) { mutableStateOf<DoubanDetail?>(null) }
     var doubanLoading by remember(group) { mutableStateOf(true) }
+    // 是否仍在后台找源：只有豆瓣条目起步（占位组）时为真，补到真实源或确认找不到后清零。
+    var enriching by remember(group) {
+        mutableStateOf(enrichAnchor != null && group.items.all { it.sourceId.isBlank() })
+    }
     // 播放只是本页顶部的一个状态切换，不动导航栈。
     var playing by remember(group) { mutableStateOf<PlayTarget?>(null) }
+
+    // 占位条目（sourceId 空）表示"还没解析到源"，不能当成真源展示或持久化。
+    val hasRealSource = items.any { it.sourceId.isNotBlank() }
 
     // 横屏播放中：由 PlayerSurface 的 BackHandler 先响应，只退全屏；
     // 其余情况（含横屏但未播放）直接退出详情页。
@@ -154,6 +160,8 @@ fun DetailScreen(
             group.items.firstOrNull { it.sourceId == record.sourceId && it.vodId == record.vodId }
         } else null
         val base = matched ?: group.items.first()
+        // 占位条目不是真源：不写历史/续播状态，等后台补到真实源后再由 enrich 更新。
+        if (base.sourceId.isBlank()) return@LaunchedEffect
         if (matched != null) selected = matched
         container.store.rememberItem(base)
         if (initialPlay != null) {
@@ -171,26 +179,34 @@ fun DetailScreen(
         }
     }
 
-    // 入口只带了一条记录（历史 / 收藏）或只等到第一个命中的源时，这里在后台把其余源补齐。
-    // 只更新源列表，不动 selected / 线路 / 播放状态，避免补源时把正在看的进度重置。
+    // 后台按锚点补齐视频源。两种情况走这里：入口是豆瓣条目（占位组），或入口只有一条历史记录。
+    // 用完整标题（保留「·」等符号）搜索——采集站片名常带间隔号，之前用 coreNameOf 去掉符号
+    // 反而子串匹配不上；groupedWithVariants 在原词全源落空时会自动补搜符号变体。
     LaunchedEffect(enrichAnchor) {
         val anchor = enrichAnchor ?: return@LaunchedEffect
         val enabled = container.store.sources.value.filter { it.enabled }
-        if (enabled.isEmpty()) return@LaunchedEffect
-        // 用核心片名补搜，避免带季号后缀时模糊命中不相干的片子。
-        val searchKey = coreNameOf(anchor.title).ifBlank { anchor.title }
-        container.aggregator.progressive(enabled, searchKey).collect { outcome ->
-            val target = pickGroup(outcome.groups.orEmpty(), anchor, selected) ?: return@collect
-            if (target.items.size <= items.size) return@collect
+        if (enabled.isEmpty()) {
+            enriching = false
+            return@LaunchedEffect
+        }
+        val outcome = withContext(Dispatchers.IO) {
+            container.aggregator.groupedWithVariants(enabled, anchor.title)
+        }
+        val target = pickGroup(outcome.groups.orEmpty(), anchor)
+        // 占位条目必须被整体替换（哪怕只有 1 个源）；真实源之间才用「更多源」判断，
+        // 且只在没播放时更新选中项，避免打断播放、重置进度。
+        if (target != null && (!hasRealSource || target.items.size > items.size)) {
             items = target.items
-            // 当前源的字段可能被新结果补全（如封面/简介），值不同才换引用，
-            // 值相同不换，避免白白重启下面的 LaunchedEffect(selected) 把线路重置。
-            val current = target.items.firstOrNull { it.key == selected.key }
-            if (current != null && current != selected && playing == null) {
-                selected = current
-                resolved = current
+            if (playing == null) {
+                val current = target.items.firstOrNull { it.key == selected.key }
+                val next = current ?: target.items.first()
+                if (next != selected) {
+                    selected = next
+                    resolved = next
+                }
             }
         }
+        enriching = false
     }
 
     // 搜索结果里有些源不给播放串，换源或取详情时补一次。
@@ -407,6 +423,7 @@ fun DetailScreen(
                             val label = when {
                                 record != null -> "继续观看 ${record.episodeName.ifBlank { "上次进度" }}"
                                 episodes.isNotEmpty() -> "播放第 1 集"
+                                enriching -> "正在查找播放源…"
                                 else -> "暂无播放地址"
                             }
                             PrimaryButton(
@@ -455,29 +472,46 @@ fun DetailScreen(
                         }
                     }
                 }
-                item { SectionHeader(title = "视频源", trailing = "${items.size} 个") }
                 item {
-                    Row(
-                        modifier = Modifier
-                            .horizontalScroll(rememberScrollState())
-                            .padding(horizontal = 20.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        items.forEach { item ->
-                            LineChip(
-                                text = item.sourceName,
-                                selected = item.key == selected.key,
-                                onClick = {
-                                    // 点源只做「选中」：更新线路 / 选集列表，不打断当前播放。
-                                    // 真正切源发生在点某一集时，避免误碰一次源就把正在看的进度丢掉。
-                                    selected = item
-                                },
-                            )
+                    SectionHeader(
+                        title = "视频源",
+                        trailing = if (hasRealSource) "${items.size} 个" else null,
+                    )
+                }
+                if (!hasRealSource) {
+                    // 豆瓣条目刚进来、源还在后台找：给出诚实的状态，而不是一个空壳源。
+                    item {
+                        Text(
+                            text = if (enriching) "正在你的采集源里找这部片…" else "没在源里找到这部片，可点上方「重新匹配」重试",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Ink.Text2,
+                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+                        )
+                    }
+                } else {
+                    item {
+                        Row(
+                            modifier = Modifier
+                                .horizontalScroll(rememberScrollState())
+                                .padding(horizontal = 20.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            items.forEach { item ->
+                                LineChip(
+                                    text = item.sourceName,
+                                    selected = item.key == selected.key,
+                                    onClick = {
+                                        // 点源只做「选中」：更新线路 / 选集列表，不打断当前播放。
+                                        // 真正切源发生在点某一集时，避免误碰一次源就把正在看的进度丢掉。
+                                        selected = item
+                                    },
+                                )
+                            }
                         }
                     }
+                    // 当前源的附加信息：线路数 / 集数 / 播放地址状态。
+                    item { SourceInfoRow(item = resolved, groupCount = playGroups.size, episodeCount = episodes.size) }
                 }
-                // 当前源的附加信息：线路数 / 集数 / 播放地址状态。
-                item { SourceInfoRow(item = resolved, groupCount = playGroups.size, episodeCount = episodes.size) }
 
                 if (playGroups.size > 1) {
                     item { SectionHeader(title = "线路", trailing = "${playGroups.size} 条") }

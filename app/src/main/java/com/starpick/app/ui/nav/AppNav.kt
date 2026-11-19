@@ -73,7 +73,10 @@ sealed interface Screen {
 
     /**
      * [enrichAnchor] 非空时，详情页会按这个锚点在后台补齐其余源。
-     * 入口只带了一条记录（历史 / 收藏）或只等到第一个命中的源时用它。
+     * 入口只带了一条记录（历史 / 收藏），或只有豆瓣条目、手里还没有任何源时用它。
+     *
+     * 豆瓣条目直接进详情，不再经过解析拦截页：先用 [group] 里的占位条目把页面开出来
+     * （显示豆瓣资料），视频源在后台补。占位条目的 sourceId 为空，详情页据此显示"正在找源"。
      */
     data class Detail(
         val group: SearchGroup,
@@ -83,6 +86,25 @@ sealed interface Screen {
 
     /** 只有豆瓣条目、手里还没有任何源时才需要：拿到命中的源就换成详情页。 */
     data class Resolving(val anchor: MatchAnchor) : Screen
+
+    companion object {
+        /**
+         * 从豆瓣锚点造一个占位条目：标题/年份/封面从豆瓣资料来，但没有源、没有播放地址。
+         * 详情页据此先渲染资料卡，后台 enrichAnchor 搜到真实源后整体替换掉占位。
+         */
+        fun placeholderGroup(anchor: MatchAnchor): SearchGroup = SearchGroup(
+            title = anchor.title,
+            items = listOf(
+                VodItem(
+                    sourceId = "",
+                    sourceName = "",
+                    vodId = "",
+                    title = anchor.title,
+                    year = anchor.year,
+                ),
+            ),
+        )
+    }
 }
 
 private data class TabSpec(
@@ -144,9 +166,9 @@ fun StarpickNav(container: AppContainer) {
             enrichAnchor = current.enrichAnchor,
             onBack = pop,
             onRematch = { anchor ->
-                // 重新匹配：用同一锚点回到解析页，重新在全源里择优（替换过渡页位置逻辑在这里不需要，
-                // 从详情压一个新的 Resolving，解析成功会再压一个 Detail，返回可回到原详情）。
-                stack.add(Screen.Resolving(anchor))
+                // 重新匹配：带同一锚点压一个新的详情页，重新在后台全源里择优。
+                // 用占位组起步，返回可回到原详情。
+                stack.add(Screen.Detail(Screen.placeholderGroup(anchor), enrichAnchor = anchor))
             },
         )
 
@@ -165,8 +187,11 @@ fun StarpickNav(container: AppContainer) {
         is Screen.Search -> SearchScreen(
             container = container,
             state = searchState,
-            // 豆瓣条目没有可直接播的源，带锚点（片名/年份/原名）去用户的源里解析。
-            onOpenDouban = { anchor -> stack.add(Screen.Resolving(anchor)) },
+            // 豆瓣条目没有可直接播的源：直接进详情页先显示豆瓣资料，
+            // 带锚点（片名/年份/原名）由详情页在后台去用户的源里补齐。
+            onOpenDouban = { anchor ->
+                stack.add(Screen.Detail(Screen.placeholderGroup(anchor), enrichAnchor = anchor))
+            },
             // 视频源条目本身带播放地址，直接进详情，由用户挑源和选集。
             onOpenSource = { group -> stack.add(Screen.Detail(group)) },
             onOpenSettings = { goTab(Screen.Settings) },
@@ -196,7 +221,9 @@ fun StarpickNav(container: AppContainer) {
                         Screen.Discover -> DiscoverScreen(
                             container = container,
                             state = discoverState,
-                            onPick = { anchor -> stack.add(Screen.Resolving(anchor)) },
+                            onPick = { anchor ->
+                                stack.add(Screen.Detail(Screen.placeholderGroup(anchor), enrichAnchor = anchor))
+                            },
                             // 记录里已有可用条目，不必先等聚合：直接进详情，
                             // 其余源由详情页在后台补齐（enrichTitle）。
                             onResume = { item, record ->
