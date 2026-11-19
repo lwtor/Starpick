@@ -112,6 +112,9 @@ internal class ApkDownloader(
         try {
             downloadSingleStream(url, part, startBytes, onProgress)
             verifyApkHeader(part)
+            // The segmented path checks the ZIP central directory too; the single-stream path
+            // must hold the same bar so a truncated/concatenated body never reaches the installer.
+            verifyZipStructure(part)
         } catch (error: DownloadException) {
             // A body that is not an APK at all is garbage (e.g. an HTML error page served as
             // 200); resuming into it would only append valid bytes to junk, so drop it.
@@ -146,8 +149,10 @@ internal class ApkDownloader(
         for (channel in channels) {
             when (val result = probeOnce(channel, url)) {
                 is Probe.Usable -> return@withContext result.plan
-                Probe.NoRanges -> return@withContext null
-                Probe.Unreachable -> Unit
+                // One channel saying "no ranges" does not mean all do: a captive proxy can strip
+                // the header while a direct connection still advertises ranges. Try every channel
+                // before giving up on the segmented path.
+                Probe.NoRanges, Probe.Unreachable -> Unit
             }
         }
         null

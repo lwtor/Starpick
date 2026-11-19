@@ -328,8 +328,37 @@ class AppContainer(context: Context) {
                 }
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
-                _update.value = UpdateUiState.Failed(error.message ?: "检查失败")
+                _update.value = UpdateUiState.Failed(friendlyUpdateError(error, "检查失败"))
             }
+        }
+    }
+
+    /**
+     * SDK 的异常 message 是面向开发者的英文，直接甩给用户看不懂。这里按含义收敛成几句中文；
+     * 认不出的兜底成 [fallback]，并对明显的网络错误给「可改用浏览器下载」的指引。
+     */
+    private fun friendlyUpdateError(error: Exception, fallback: String): String {
+        val raw = error.message.orEmpty()
+        val networkHint = when {
+            raw.contains("timeout", ignoreCase = true) ||
+                raw.contains("timed out", ignoreCase = true) -> "连接超时"
+            raw.contains("could not reach", ignoreCase = true) ||
+                raw.contains("unreachable", ignoreCase = true) ||
+                raw.contains("Failed to connect", ignoreCase = true) ||
+                raw.contains("ECONNREFUSED", ignoreCase = true) -> "连不上下载服务器"
+            raw.contains("no published release", ignoreCase = true) -> "暂无已发布的版本"
+            raw.contains("not an Android package", ignoreCase = true) ||
+                raw.contains("corrupted", ignoreCase = true) ||
+                raw.contains("truncated", ignoreCase = true) -> "下载文件损坏，请重试"
+            raw.contains("stalled", ignoreCase = true) -> "下载中断，请重试"
+            raw.contains("rate limit", ignoreCase = true) ||
+                raw.contains("403", ignoreCase = true) -> "检查太频繁，请稍后再试"
+            else -> null
+        }
+        return when {
+            networkHint != null -> "$networkHint，也可改用浏览器下载"
+            raw.isBlank() -> fallback
+            else -> "$fallback：$raw"
         }
     }
 
@@ -377,11 +406,14 @@ class AppContainer(context: Context) {
                 }
                 if (token != downloadToken) return@launch
                 downloadedApk = versionCode to file
+                // 落盘记录：进程被杀后内存变量会丢，下次冷启动靠这条让 cachedApk 命中，
+                // 直接显示「待安装」而不是重新下一遍 25 MB。
+                updater.rememberDownloadedApk(versionCode, file)
                 _update.value = UpdateUiState.Ready(versionCode, file)
             } catch (error: Exception) {
                 if (error is CancellationException) return@launch
                 if (token != downloadToken) return@launch
-                _update.value = UpdateUiState.Failed(error.message ?: "下载失败")
+                _update.value = UpdateUiState.Failed(friendlyUpdateError(error, "下载失败"))
             }
         }
     }

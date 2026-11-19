@@ -52,9 +52,11 @@ class Updater private constructor(
             return fallbackCheck(installedVersionCode) ?: throw error
         }
         val asset = ReleaseSelection.pickUpdateApk(release.assets)
-            ?: return UpdateCheck.NoInstallableAsset
+            // API 有时返回被限流裁剪过的残缺 release（assets 为空或没有可识别的 APK）。
+            // 这时不急着判失败：固定名兜底通道不依赖 API 返回的 assets，也许还能救回来。
+            ?: return fallbackCheck(installedVersionCode) ?: UpdateCheck.NoInstallableAsset
         val versionCode = config.versionResolver.versionCodeOf(release.tagName, asset.name)
-            ?: return UpdateCheck.NoInstallableAsset
+            ?: return fallbackCheck(installedVersionCode) ?: UpdateCheck.NoInstallableAsset
         return if (ReleaseSelection.isUpdate(versionCode, installedVersionCode)) {
             UpdateCheck.Available(release, asset, versionCode)
         } else {
@@ -92,6 +94,10 @@ class Updater private constructor(
     }
 
     override fun cachedApk(versionCode: Long): File? = stateStore.cachedApkForVersion(versionCode)
+
+    override fun rememberDownloadedApk(versionCode: Long, apk: File) {
+        stateStore.saveDownloadedApk(versionCode, apk.absolutePath)
+    }
 
     override suspend fun downloadInForeground(asset: ReleaseAsset): File {
         val targetName = ReleaseSelection.sanitizeAssetFileName(asset.name)
