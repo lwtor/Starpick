@@ -56,6 +56,42 @@ class SearchAggregator(private val api: CmsV10Api) {
     ): SearchOutcome = toOutcome(search(sites, keyword, page))
 
     /**
+     * 带写法规避的搜索：先用原词搜，**仅当所有源都零结果**时，才并发补搜词形变体。
+     *
+     * 苹果 CMS 用标题子串匹配，用户「哈利波特」搜不到写成「哈利·波特」的片，
+     * 是实测量子源 / dytt 源上真实发生的高频落空原因。原词命中时这条路径零额外开销。
+     * 翻页（[page] > 1）不补偿：否则不同词的第 2 页会混进同一份结果、重复且无序。
+     */
+    suspend fun groupedWithVariants(
+        sites: List<SourceSite>,
+        keyword: String,
+        page: Int = 1,
+    ): SearchOutcome = supervisorScope {
+        val first = search(sites, keyword, page)
+        if (first.items.isNotEmpty() || page > 1) return@supervisorScope toOutcome(first)
+
+        val variants = SearchTerms.variants(keyword).drop(1) // 第 1 个是原词，已搜过
+        if (variants.isEmpty()) return@supervisorScope toOutcome(first)
+
+        // 每个变体都对全部源搜一轮；变体之间并发，单源超时由 search() 内部兜住。
+        val rounds = variants.map { variant ->
+            async {
+                runCatching { withTimeout(PER_SOURCE_TIMEOUT_MS) { search(sites, variant, page) } }
+                    .getOrDefault(SearchOutcome())
+            }
+        }.awaitAll()
+
+        val items = mutableListOf<VodItem>()
+        val seen = HashSet<String>()
+        val failed = LinkedHashSet(first.failedSources)
+        (listOf(first) + rounds).forEach { outcome ->
+            outcome.items.forEach { if (seen.add(it.key)) items += it }
+            failed.addAll(outcome.failedSources)
+        }
+        toOutcome(SearchOutcome(items, failedSources = failed.toList()))
+    }
+
+    /**
      * 把多页结果合成一份：按 `sourceId:vodId` 去掉跨页重复（不同站调整分页时会重复），
      * 再按标题重新分组、按源数量排序。翻页时调用方只保留合并后的这一份。
      */

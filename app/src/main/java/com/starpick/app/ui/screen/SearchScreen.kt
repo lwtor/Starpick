@@ -218,7 +218,7 @@ fun SearchScreen(
             launch {
                 try {
                     val result = withContext(Dispatchers.IO) {
-                        container.aggregator.grouped(enabledSources, keyword, 1)
+                        container.aggregator.groupedWithVariants(enabledSources, keyword, 1)
                     }
                     state.sourceOutcome = result
                     state.sourceHasMore = result.items.isNotEmpty()
