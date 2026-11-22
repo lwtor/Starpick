@@ -76,10 +76,12 @@ import com.starpick.app.ui.component.PrimaryButton
 import com.starpick.app.ui.component.SectionHeader
 import com.starpick.app.ui.theme.Accent
 import com.starpick.app.ui.theme.Ink
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * 详情页 = 播放页，三段式布局（同一个页面，无跳转）：
@@ -88,6 +90,22 @@ import kotlinx.coroutines.withContext
  *     查不到豆瓣信息时显示兜底卡，但播放、选集等一律照常。
  *  3. 底部：视频源及源相关信息（线路数 / 集数 / 播放地址状态）、线路、选集。
  */
+/**
+ * 匹配前等豆瓣补年份的上限。
+ *
+ * 采集站搜索本身要几秒，这 1.5 秒基本被并行吸收，感知不到；但豆瓣卡住时
+ * 不能跟着卡——没有年份的匹配虽然弱，也比一直转圈好。
+ */
+private const val YEAR_LOOKUP_TIMEOUT_MS = 1_500L
+
+/**
+ * 详情页补源最多翻几页。
+ *
+ * 采集站一页 20 条，常用词的第一页往往全是新上架的沾边内容，正片在两三页之后。
+ * 翻到 3 页仍找不到，基本就是这些源确实没有这部片，再多翻只是拖时间。
+ */
+private const val MAX_DETAIL_SEARCH_PAGES = 3
+
 @Composable
 fun DetailScreen(
     container: AppContainer,
@@ -146,14 +164,22 @@ fun DetailScreen(
     // 其余情况（含横屏但未播放）直接退出详情页。
     BackHandler(enabled = !isLandscape || playing == null) { onBack() }
 
-    // 按片名查豆瓣详情：失败就留 null，页面显示兜底卡，绝不影响播放与选集。
-    LaunchedEffect(group.title) {
+    // 豆瓣详情有两个用途：渲染资料卡，以及给匹配锚点补年份。
+    //
+    // 后者不是锦上添花。从「搜索演员名」进来时锚点是 `subjectsByTag` 建的，而那个接口
+    // 不返回年份，于是 `YearConflictRule` / `YearMatchRule` 全线空转——采集站里
+    // 「功夫熊猫」「功夫第一季」「石家庄功夫」几十条同名沾边条目一条都拦不住。
+    // 查询词优先取锚点标题：那是豆瓣自己的片名，用它查到的年份才是这部片的年份。
+    val doubanLookup = enrichAnchor?.title ?: group.title
+    val doubanGate = remember(group, doubanLookup) { CompletableDeferred<DoubanDetail?>() }
+    LaunchedEffect(doubanLookup) {
         doubanLoading = true
         val detail = withContext(Dispatchers.IO) {
-            container.douban.detailByTitle(group.title)
+            container.douban.detailByTitle(doubanLookup)
         }
         douban = detail
         doubanLoading = false
+        doubanGate.complete(detail)
     }
 
     LaunchedEffect(group) {
@@ -187,16 +213,25 @@ fun DetailScreen(
     // 采集站是子串匹配，搜「某某 第一季」在片名写作「某某」的站上必然 0 结果；
     // 反过来搜「某某」在两种写法下都命中，命中面只增不减。季号筛选交给匹配管线的季号规则。
     LaunchedEffect(enrichAnchor) {
-        val anchor = enrichAnchor ?: return@LaunchedEffect
+        val incoming = enrichAnchor ?: return@LaunchedEffect
         val enabled = container.store.sources.value.filter { it.enabled }
         if (enabled.isEmpty()) {
             enriching = false
             return@LaunchedEffect
         }
+        // 最多等豆瓣 1.5 秒把年份补齐。等到了，《功夫》就能靠 2004 一次性否掉
+        // 《功夫熊猫》《功夫第一季》《功夫足球》；等不到（豆瓣慢或挂了）照常往下走，
+        // 宁可这一轮匹配弱一点，也不让人对着「正在找源」干等。
+        val detail = withTimeoutOrNull(YEAR_LOOKUP_TIMEOUT_MS) { doubanGate.await() }
+        val anchor = incoming.copy(year = incoming.year.ifBlank { detail?.year.orEmpty() })
+
         MatchTrace.begin("匹配《${anchor.title}》")
+        if (incoming.year.isBlank() && anchor.year.isNotBlank()) {
+            MatchTrace.note("豆瓣补年份: ${anchor.year}（原来没有年份，沾边条目全靠片名判）")
+        }
         MatchTrace.anchor(anchor)
         try {
-            val outcome = withContext(Dispatchers.IO) {
+            var outcome = withContext(Dispatchers.IO) {
                 container.aggregator.groupedWithVariants(
                     sites = enabled,
                     keyword = anchor.searchKeyword,
@@ -206,7 +241,31 @@ fun DetailScreen(
                     fillSilentSources = true,
                 )
             }
-            val target = pickGroup(outcome.groups.orEmpty(), anchor)
+            var target = pickGroup(outcome.groups.orEmpty(), anchor)
+
+            // 第一页凑不出一组可信候选时继续往后翻。
+            // 采集站按更新时间倒序返回，「功夫」这类常用词的第一页常被新上架的赛事、
+            // 短剧占满（实测四个源各 20 条里没有一条是正片），正片排在几十条之后。
+            // 这不是匹配规则的问题——压根没搜到，规则再好也没用。
+            // 只在彻底没结果时翻页，正常路径零额外请求。
+            var page = 1
+            while (target == null && page < MAX_DETAIL_SEARCH_PAGES) {
+                page++
+                val next = withContext(Dispatchers.IO) {
+                    container.aggregator.groupedWithVariants(
+                        sites = enabled,
+                        keyword = anchor.searchKeyword,
+                        page = page,
+                    )
+                }
+                if (next.items.isEmpty()) break
+                outcome = container.aggregator.merge(listOf(outcome, next))
+                // 合并后的组包含上一页的条目，这里不重复写候选明细，只留决策。
+                target = pickGroup(outcome.groups.orEmpty(), anchor, trace = false)
+            }
+            if (page > 1) {
+                MatchTrace.note("翻页: 第 1 页无可信候选，已翻到第 $page 页")
+            }
             // 占位条目必须被整体替换（哪怕只有 1 个源）；真实源之间才用「更多源」判断，
             // 且只在没播放时更新选中项，避免打断播放、重置进度。
             if (target != null && (!hasRealSource || target.items.size > items.size)) {

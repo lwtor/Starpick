@@ -48,7 +48,41 @@ object MediaTag {
             tokens.firstOrNull { it in VERSIONS }?.let { return it }
             return tokens.first()
         }
-        return null
+        return suffixOf(title)
+    }
+
+    /**
+     * 不带括号的尾部标注：「功夫粤语」→「粤语」、「功夫[4K]国语」→「国语」。
+     *
+     * 采集源有一半不写括号，直接把语言缀在片名后面。只认尾部：中段出现的「粤语」
+     * 多半是片名的一部分（「功夫热粤语」的片名是「功夫热」）。
+     */
+    private fun suffixOf(title: String): String? {
+        var rest = title.trim().lowercase()
+        var found: String? = null
+        while (true) {
+            val hit = VOCAB.firstOrNull { rest.endsWith(it) && rest.length > it.length } ?: break
+            // 语言优先于画质，和括号内的取值口径保持一致。
+            if (found == null || (hit in LANGUAGES && found !in LANGUAGES)) found = hit
+            rest = rest.dropLast(hit.length)
+        }
+        return found
+    }
+
+    /**
+     * 把片名尾部不带括号的版本标注剥掉：「沙丘粤语」→「沙丘」、「功夫热粤语」→「功夫热」。
+     *
+     * 这一步是给 [com.starpick.app.core.model.coreNameOf] 用的。括号里的标注那里已经
+     * 整段删了，但「功夫粤语」这种写法会让核心名变成「功夫粤语」，和锚点「功夫」
+     * 只能走"包含"判低分——而它其实就是《功夫》的粤语版，理应完全一致。
+     */
+    fun stripSuffix(title: String): String {
+        var s = title.trim()
+        while (true) {
+            val hit = VOCAB.firstOrNull { s.lowercase().endsWith(it) && s.length > it.length } ?: break
+            s = s.dropLast(hit.length).trim()
+        }
+        return s
     }
 
     /**

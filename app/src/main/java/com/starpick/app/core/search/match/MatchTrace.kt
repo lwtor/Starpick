@@ -106,15 +106,26 @@ object MatchTrace {
     fun candidate(item: VodItem, result: MatchResult) {
         synchronized(lock) {
             if (depth == 0) return
-            val mark = if (result.accepted) "✓" else "✗"
+            // ✓ 进源列表、✗ 被规则否决、△ 规则都过了但分数不够（沾边太弱）
+            val mark = when {
+                result.accepted -> "✓"
+                result.weak -> "△"
+                else -> "✗"
+            }
             val name = pad("$mark ${item.title}", NAME_WIDTH)
             val score = pad("${result.score} 分", SCORE_WIDTH)
-            val detail = if (result.accepted) {
-                result.bonuses.joinToString(", ").ifEmpty { "通过" } +
-                    (result.tag?.let { "  {$it}" } ?: "") +
-                    "  @${item.sourceName}"
-            } else {
-                result.rejectedBy ?: "未通过"
+            val detail = when {
+                result.accepted -> {
+                    result.bonuses.joinToString(", ").ifEmpty { "通过" } +
+                        (result.tag?.let { "  {$it}" } ?: "") +
+                        "  @${item.sourceName}"
+                }
+                result.weak -> {
+                    "分数不足（需 ≥ $MIN_ACCEPT_SCORE）：" +
+                        result.bonuses.joinToString(", ").ifEmpty { "-" } +
+                        "  @${item.sourceName}"
+                }
+                else -> result.rejectedBy ?: "未通过"
             }
             append("  $name$score$detail")
         }

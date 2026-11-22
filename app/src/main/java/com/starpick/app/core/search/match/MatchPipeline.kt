@@ -18,6 +18,9 @@ object MatchPipeline {
         DerivativeRule,
         YearConflictRule,
         SeasonConflictRule,
+        // 放在片名规则之前：减分不依赖顺序（不会被短路），位置只影响日志可读性——
+        // 先报「候选多标了季号」这个事实，再看片名给了几分，一眼能看出分是被谁拉低的。
+        SeasonUntaggedRule,
         CoreNameRule,
         OriginalTitleRule,
         YearMatchRule,

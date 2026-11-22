@@ -80,10 +80,15 @@ object SeasonConflictRule : MatchRule {
 }
 
 /**
- * 片名核心比对：完全相等 6 分、一方包含另一方 2 分、其余否决。
+ * 片名核心比对：完全相等 6 分，一方包含另一方按可辨识度分三档，其余否决。
  *
- * 包含只给低分是为了挡住「越狱兔」被「越狱二人组」这类沾边条目抢走：
- * 能把它们收进候选，但不能和正片平起平坐。
+ * 包含关系给多少分，取决于**短的那个片名有多长**——这是它携带多少信息的直接度量：
+ *  - 4 字以上（「灌篮高手」⊂「灌篮高手 THE FIRST」）3 分，够格进源列表；
+ *  - 3 字（「越狱兔」⊂「越狱二人组」）2 分，能进候选但过不了门槛；
+ *  - 2 字以内（「功夫」⊂「功夫熊猫」/「石家庄功夫」/「废土世界，这里的僵尸会功夫」）1 分。
+ *
+ * 短名那一档是这次串片的主因：采集站里带「功夫」两个字的条目一口气几十条，
+ * 全是足球赛事、古装剧、解说，一律 2 分放行的话详情页就成了噪音列表。
  */
 object CoreNameRule : MatchRule {
     override val id = "core-name"
@@ -93,15 +98,43 @@ object CoreNameRule : MatchRule {
         val a = ctx.anchorCore
         val b = ctx.itemCore
         if (a.isEmpty() || b.isEmpty()) return Verdict.Reject("片名为空")
-        return when {
-            a == b -> Verdict.Bonus(6, "片名完全一致")
-            a in b || b in a -> Verdict.Bonus(2, "片名部分一致")
-            // 译名对不上时用原名兜底。
-            // 之前这条路径是断的：核心名不符直接否决，原名加分永远轮不到执行，
-            // 于是「豆瓣用译名、采集站用原名」这类片一律匹配失败。
-            ctx.originalMatched -> Verdict.Bonus(2, "原名兜底命中")
-            else -> Verdict.Reject("片名不符")
+        if (a == b) return Verdict.Bonus(6, "片名完全一致")
+        if (a in b || b in a) {
+            return when (minOf(a.length, b.length)) {
+                in 4..Int.MAX_VALUE -> Verdict.Bonus(3, "片名包含（长名，可信）")
+                3 -> Verdict.Bonus(2, "片名包含（3 字，偏弱）")
+                else -> Verdict.Bonus(1, "片名包含（2 字以内，几乎必是噪音）")
+            }
         }
+        // 译名对不上时用原名兜底。
+        // 之前这条路径是断的：核心名不符直接否决，原名加分永远轮不到执行，
+        // 于是「豆瓣用译名、采集站用原名」这类片一律匹配失败。
+        return if (ctx.originalMatched) {
+            Verdict.Bonus(2, "原名兜底命中")
+        } else {
+            Verdict.Reject("片名不符")
+        }
+    }
+}
+
+/**
+ * 锚点没标季号、候选却标了 → 大幅降分。
+ *
+ * 豆瓣把电影叫《功夫》，采集站里那部剧叫《功夫第一季》。两者核心名都归一成「功夫」，
+ * 原本同拿 6 分，然后同分按"源数多者优先"，剧的条目顺序靠前就赢了电影——
+ * 这正是「点电影进去变成一部剧」的直接原因。电影不可能有季号，所以这个方向可靠。
+ *
+ * 只罚单向。锚点标季、候选不标是常态（大量采集源根本不区分季号），
+ * 罚它会让这些源直接消失，那是拿"找不到"换"不串片"，得不偿失。
+ */
+object SeasonUntaggedRule : MatchRule {
+    override val id = "season-untagged"
+    override val name = "候选多标了季号"
+
+    override fun evaluate(ctx: MatchContext): Verdict {
+        if (ctx.anchorSeason != null) return Verdict.Pass
+        val season = ctx.itemSeason ?: return Verdict.Pass
+        return Verdict.Bonus(-4, "候选标了第${season}季，锚点无季号")
     }
 }
 

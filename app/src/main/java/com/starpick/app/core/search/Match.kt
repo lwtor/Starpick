@@ -14,6 +14,9 @@ import com.starpick.app.core.search.match.MatchTrace
  * 「粤语 / 国语 / 英文」合到一组，也会把「[电影解说]」一并带进来；
  * 用 `maxOf` 粗判的话，解说条目会跟着正片一起出现在详情页的源列表里。
  *
+ * [trace] 关掉时只写组级决策、不逐条写候选：翻页试算会对合并后的组反复裁决，
+ * 候选明细翻几页就写几遍，会把真正有用的决策行挤出日志上限。
+ *
  * 纯 Kotlin，零 Android / Compose 依赖，属于可整体搬进 KMP commonMain 的范围。
  * 原先它躺在 ui/screen 里，是历史原因，不是设计。
  */
@@ -21,10 +24,11 @@ internal fun pickGroup(
     groups: List<SearchGroup>,
     anchor: MatchAnchor,
     preferred: VodItem? = null,
+    trace: Boolean = true,
 ): SearchGroup? {
     val scored = groups.mapNotNull { group ->
         val judged = group.items.map { it to MatchPipeline.judge(anchor, it) }
-        judged.forEach { (item, result) -> MatchTrace.candidate(item, result) }
+        if (trace) judged.forEach { (item, result) -> MatchTrace.candidate(item, result) }
         val alive = judged.filter { (_, result) -> result.accepted }
         if (alive.isEmpty()) return@mapNotNull null
         val best = alive.maxOf { (_, result) -> result.score }

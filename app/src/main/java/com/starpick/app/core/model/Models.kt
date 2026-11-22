@@ -133,12 +133,16 @@ internal fun seasonNumberOf(title: String): Int? {
 
 /** 核心片名：去版本标注、季号、集数、年份与标点，供跨源比对。 */
 fun coreNameOf(title: String): String {
-    var s = title.lowercase().replace(TITLE_BRACKET, "")
+    // 先剥不带括号的尾部版本标注（「功夫粤语」→「功夫」），再删括号里那些。
+    // 不剥的话「功夫粤语」的核心名是「功夫粤语」，和锚点「功夫」只能判"包含"拿低分，
+    // 而它其实就是《功夫》的粤语版——这类漏匹配在采集源上非常常见。
+    val bare = MediaTag.stripSuffix(title)
+    var s = bare.lowercase().replace(TITLE_BRACKET, "")
     s = s.replace(SEASON_WORD, "").replace(TITLE_YEAR, "").replace(TITLE_NOISE, "")
     repeat(2) { s = s.replace(EPISODE_TAIL, "") }
     // 整名片名就是年份的情况（《2046》《1917》《2012》）删完为空，回退到只去噪点的结果。
     // 不回退的话这些片的锚点核心名恒为空，跨源匹配永远判「片名为空」，一条源都命中不了。
-    return s.ifBlank { title.lowercase().replace(TITLE_NOISE, "") }
+    return s.ifBlank { bare.lowercase().replace(TITLE_NOISE, "") }
 }
 
 /**

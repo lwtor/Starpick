@@ -31,6 +31,20 @@ sealed interface Verdict {
 }
 
 /**
+ * 进入源列表所需的最低分。
+ *
+ * 定在 3 分是因为它正好卡在「有结构化佐证」与「纯片名沾边」之间：
+ *  - 片名完全一致 6 ✓
+ *  - 长片名包含 2 + 年份一致 1 = 3 ✓（「灌篮高手」vs「灌篮高手 THE FIRST」这类要靠它）
+ *  - 纯包含 2、短名包含 1、以及「电影锚点撞上同名剧」6-4=2 ✗
+ *
+ * 前端那个「点 A 进 B」的投诉，绝大多数是 2 分以下的沾边条目被当成了可用源。
+ * 门槛宁可漏掉几条，也不把噪音铺进详情页——漏了用户看得出「没找到」，
+ * 噪音混进去用户只会以为匹配坏了。
+ */
+const val MIN_ACCEPT_SCORE = 3
+
+/**
  * 一次完整判定的结果。
  *
  * [rejectedBy] 与 [bonuses] 是给诊断用的：界面上只说「没找到源」，
@@ -42,7 +56,10 @@ data class MatchResult(
     val bonuses: List<String> = emptyList(),
     val tag: String? = null,
 ) {
-    val accepted: Boolean get() = score > 0
+    val accepted: Boolean get() = score >= MIN_ACCEPT_SCORE
+
+    /** 通过了所有否决规则，但分数不够进门槛——日志里要说清是"太弱"而不是"被规则拒"。 */
+    val weak: Boolean get() = rejectedBy == null && score > 0 && !accepted
 }
 
 /**
