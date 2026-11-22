@@ -56,27 +56,51 @@ class SearchAggregator(private val api: CmsV10Api) {
     ): SearchOutcome = toOutcome(search(sites, keyword, page))
 
     /**
-     * 带写法规避的搜索：先用原词搜，**仅当所有源都零结果**时，才并发补搜词形变体。
+     * 带写法规避的搜索：先用原词搜，落空时再并发补搜词形变体。
      *
      * 苹果 CMS 用标题子串匹配，用户「哈利波特」搜不到写成「哈利·波特」的片，
      * 是实测量子源 / dytt 源上真实发生的高频落空原因。原词命中时这条路径零额外开销。
-     * 翻页（[page] > 1）不补偿：否则不同词的第 2 页会混进同一份结果、重复且无序。
+     *
+     * 补搜范围由 [fillSilentSources] 决定，两条路径的取舍不同：
+     *  - false（手动搜索）：仅当**全部源**都零结果才补。用户能自己换个词再搜，
+     *    不该为少数沉默源多等一轮。
+     *  - true（豆瓣 → 详情）：只要还有源没返回结果就补，而且只补这些沉默的源。
+     *    这条路径用户没有「换个词重搜」的手段，必须尽力找齐。
+     *
+     * 翻页（[page] > 1）一律不补偿：否则不同词的第 2 页会混进同一份结果、重复且无序。
+     *
+     * @param aliases 原名 / 别名等额外候选词，只在补搜阶段参与。
      */
     suspend fun groupedWithVariants(
         sites: List<SourceSite>,
         keyword: String,
         page: Int = 1,
+        aliases: List<String> = emptyList(),
+        fillSilentSources: Boolean = false,
     ): SearchOutcome = supervisorScope {
         val first = search(sites, keyword, page)
-        if (first.items.isNotEmpty() || page > 1) return@supervisorScope toOutcome(first)
+        if (page > 1) return@supervisorScope toOutcome(first)
 
-        val variants = SearchTerms.variants(keyword).drop(1) // 第 1 个是原词，已搜过
+        // 手动搜索：原词已经有结果就收工。
+        if (!fillSilentSources && first.items.isNotEmpty()) return@supervisorScope toOutcome(first)
+
+        // 只对没返回结果的源补搜：已命中的源不再打扰，既不浪费请求，
+        // 也不会把已经拿到的结果换成一个写法变体下的近似条目。
+        val targets = if (fillSilentSources) {
+            val answered = first.items.map { it.sourceId }.toSet()
+            sites.filter { it.enabled && it.id !in answered }
+        } else {
+            sites
+        }
+        if (targets.isEmpty()) return@supervisorScope toOutcome(first)
+
+        val variants = SearchTerms.variants(keyword, aliases).drop(1) // 第 1 个是原词，已搜过
         if (variants.isEmpty()) return@supervisorScope toOutcome(first)
 
-        // 每个变体都对全部源搜一轮；变体之间并发，单源超时由 search() 内部兜住。
+        // 每个变体都对目标源搜一轮；变体之间并发，单源超时由 search() 内部兜住。
         val rounds = variants.map { variant ->
             async {
-                runCatching { withTimeout(PER_SOURCE_TIMEOUT_MS) { search(sites, variant, page) } }
+                runCatching { withTimeout(PER_SOURCE_TIMEOUT_MS) { search(targets, variant, page) } }
                     .getOrDefault(SearchOutcome())
             }
         }.awaitAll()

@@ -144,10 +144,14 @@ class DoubanApi(private val client: HttpClient) {
                     id = candidate.id,
                     title = candidate.title,
                     cover = candidate.cover,
-                    year = candidate.episodesInfo
-                        .split(" · ")
-                        .firstOrNull { it.matches(Regex("\\d{4}")) }
-                        .orEmpty(),
+                    // year 在 suggest 里是独立字段，优先用它；拆 episodesInfo 只是老兜底——
+                    // 那段片段格式一变就丢年份，而年份是跨源匹配的硬约束，不能靠猜。
+                    year = candidate.year.ifBlank {
+                        candidate.episodesInfo
+                            .split(" · ")
+                            .firstOrNull { it.matches(Regex("\\d{4}")) }
+                            .orEmpty()
+                    },
                     url = candidate.url,
                 )
                 fetchAbstract(candidate.id)?.let { base.copy(

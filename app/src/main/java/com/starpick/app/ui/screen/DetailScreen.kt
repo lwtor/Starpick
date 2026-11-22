@@ -65,6 +65,7 @@ import com.starpick.app.core.model.VodItem
 import com.starpick.app.core.model.WatchProgress
 import com.starpick.app.core.model.historyKeyOf
 import com.starpick.app.core.parser.PlaylistParser
+import com.starpick.app.core.search.pickGroup
 import com.starpick.app.ui.component.EmptyState
 import com.starpick.app.ui.component.EpisodeCell
 import com.starpick.app.ui.component.FlowPosterGrid
@@ -180,8 +181,9 @@ fun DetailScreen(
     }
 
     // 后台按锚点补齐视频源。两种情况走这里：入口是豆瓣条目（占位组），或入口只有一条历史记录。
-    // 用完整标题（保留「·」等符号）搜索——采集站片名常带间隔号，之前用 coreNameOf 去掉符号
-    // 反而子串匹配不上；groupedWithVariants 在原词全源落空时会自动补搜符号变体。
+    // 搜索词用 anchor.searchKeyword —— 剥掉季号 / 年份 / 方括号，但保留「·」这类符号。
+    // 采集站是子串匹配，搜「某某 第一季」在片名写作「某某」的站上必然 0 结果；
+    // 反过来搜「某某」在两种写法下都命中，命中面只增不减。季号筛选交给 anchorMatchScore。
     LaunchedEffect(enrichAnchor) {
         val anchor = enrichAnchor ?: return@LaunchedEffect
         val enabled = container.store.sources.value.filter { it.enabled }
@@ -190,7 +192,14 @@ fun DetailScreen(
             return@LaunchedEffect
         }
         val outcome = withContext(Dispatchers.IO) {
-            container.aggregator.groupedWithVariants(enabled, anchor.title)
+            container.aggregator.groupedWithVariants(
+                sites = enabled,
+                keyword = anchor.searchKeyword,
+                // 豆瓣用译名、采集站用原名时，只靠译名永远搜不出结果。
+                aliases = listOf(anchor.originalTitle),
+                // 这条路径用户没有「换个词重搜」的手段，对沉默的源也要尽力找齐。
+                fillSilentSources = true,
+            )
         }
         val target = pickGroup(outcome.groups.orEmpty(), anchor)
         // 占位条目必须被整体替换（哪怕只有 1 个源）；真实源之间才用「更多源」判断，

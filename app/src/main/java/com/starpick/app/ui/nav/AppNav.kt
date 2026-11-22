@@ -44,7 +44,6 @@ import com.starpick.app.ui.screen.DiscoverScreen
 import com.starpick.app.ui.screen.DiscoverUiState
 import com.starpick.app.ui.screen.HomeScreen
 import com.starpick.app.ui.screen.HomeUiState
-import com.starpick.app.ui.screen.ResolvingScreen
 import com.starpick.app.ui.screen.SearchScreen
 import com.starpick.app.ui.screen.SearchUiState
 import com.starpick.app.ui.screen.SettingsScreen
@@ -83,9 +82,6 @@ sealed interface Screen {
         val initialPlay: WatchProgress? = null,
         val enrichAnchor: MatchAnchor? = null,
     ) : Screen
-
-    /** 只有豆瓣条目、手里还没有任何源时才需要：拿到命中的源就换成详情页。 */
-    data class Resolving(val anchor: MatchAnchor) : Screen
 
     companion object {
         /**
@@ -170,18 +166,6 @@ fun StarpickNav(container: AppContainer) {
                 // 用占位组起步，返回可回到原详情。
                 stack.add(Screen.Detail(Screen.placeholderGroup(anchor), enrichAnchor = anchor))
             },
-        )
-
-        is Screen.Resolving -> ResolvingScreen(
-            container = container,
-            anchor = current.anchor,
-            // 必须「替换」而不是「压栈」：过渡页只负责解析片名，解析完就不该留在返回栈里。
-            // 之前是 add，导致详情页返回后回落到 Resolving，它又会重新解析并再次推开详情，
-            // 表现出来就是「详情页返回不了」。
-            onResolved = { group ->
-                stack[stack.lastIndex] = Screen.Detail(group, enrichAnchor = current.anchor)
-            },
-            onBack = pop,
         )
 
         is Screen.Search -> SearchScreen(

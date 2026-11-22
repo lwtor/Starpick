@@ -47,7 +47,16 @@ data class VodItem(
  */
 private val TITLE_NOISE = Regex("[\\s\\p{Z}\\u200B-\\u200D\\uFEFF:：·・\\-—_（）()【】\\[\\]]")
 
-fun contentKeyOf(title: String): String = title.lowercase().replace(TITLE_NOISE, "")
+fun contentKeyOf(title: String): String {
+    val base = title.lowercase().replace(TITLE_NOISE, "")
+    // 中文数字季号归一成阿拉伯数字。否则「某某 第1季」与「某某 第一季」在搜索结果里
+    // 会分成两组、是两个卡片，而 historyKeyOf 早已把两者当成同一条——
+    // 同一部剧在两个入口算出两种键，分组和续播就会互相打架。
+    return base.replace(CN_SEASON) { match ->
+        val number = cnSeasonNumber(match.groupValues[1])
+        if (number > 0) "第${number}季" else match.value
+    }
+}
 
 /**
  * 观看历史的内容键。
@@ -118,34 +127,52 @@ fun coreNameOf(title: String): String {
     return s
 }
 
-/** 豆瓣条目与源站结果是否可能指向同一部片（核心名相等或一方包含另一方）。 */
-fun titleMatches(expected: String, candidate: String): Boolean {
-    val a = coreNameOf(expected)
-    val b = coreNameOf(candidate)
-    if (a.isEmpty() || b.isEmpty()) return false
-    if (a.length < 2 || b.length < 2) return a == b
-    return a == b || a in b || b in a
-}
-
-/** 匹配质量打分：核心完全一致 > 包含；季号吻合额外加分。用于同系列多季时择优。 */
-fun titleMatchScore(expected: String, candidate: String): Int {
-    val a = coreNameOf(expected)
-    val b = coreNameOf(candidate)
-    val base = when {
-        a == b -> 4
-        a in b || b in a -> 1
-        else -> return 0
-    }
-    val expectedSeason = seasonNumberOf(expected)
-    return if (expectedSeason != null && expectedSeason == seasonNumberOf(candidate)) base + 2 else base
+/**
+ * 拿去采集源搜索的词：剥掉季号 / 年份 / 方括号标注，其余（含间隔号等符号）原样保留。
+ *
+ * 采集站是 `vod_name` 子串匹配，搜成「某某 第一季」时，片名写作「某某」的站必然 0 结果
+ * ——这是从豆瓣带季号的条目进来最容易踩的坑。反过来搜「某某」，片名写作「某某 第一季」
+ * 的站仍然命中，因为短串是长串的子串。所以搜索词取宽的那个，筛选交给
+ * [anchorMatchScore] 的季号 / 年份否决，是严格更优的：命中面只增不减。
+ *
+ * 刻意不动「·」「:」这类符号：采集站正片名常带它们，去掉就搜不到了。
+ * 整个片名都是年份的情况（《2046》《1917》）剥完为空，回退原标题。
+ */
+fun searchNameOf(title: String): String {
+    val stripped = title
+        .replace(TITLE_BRACKET, " ")
+        .replace(SEASON_WORD, " ")
+        .replace(TITLE_YEAR, " ")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+    return stripped.ifBlank { title.trim() }
 }
 
 // ------------------------------------------------ 跨源锚点匹配（豆瓣 → 采集源）
+
+/** 素材 / 衍生内容标注：与正片同源同名，但根本不是同一部片，不能当播放源。 */
+private val DERIVATIVE_TAG = Regex(
+    "解说|预告|花絮|速看|片段|彩蛋|特辑|混剪|影评|解析|盘点|reaction|trailer",
+    RegexOption.IGNORE_CASE,
+)
+
+/**
+ * 候选名带衍生标注、而锚点不带 → 这是解说 / 预告片，不是用户在找的那部片。
+ *
+ * 这是 [coreNameOf] 的盲区：它会连方括号带内容整体删掉，「越狱兔[电影解说]」的核心名
+ * 因此等于「越狱兔」，和正片拿到同一个 6 分，再被「同分取源多者」的规则选中——
+ * 解说类内容往往比正片铺得更广，于是稳定抢走正片的位置。
+ *
+ * 「合集」刻意不算：某某合集通常就是正片全集，仍然可播。
+ */
+private fun isDerivativeOf(expected: String, candidate: String): Boolean =
+    DERIVATIVE_TAG.containsMatchIn(candidate) && !DERIVATIVE_TAG.containsMatchIn(expected)
 
 /**
  * 锚点与采集源条目的匹配评分。越高越可能是同一部片，0 表示根本不是。
  *
  * 相比裸片名比对，多了年份与季号两个硬否决：
+ *  - 衍生标注：候选是解说 / 预告时直接否决，见 [isDerivativeOf]。
  *  - 年份：两边都拿到且相差超过 1 年 → 判为不同作品（翻拍 / 同名），直接 0。
  *  - 季号：两边都明确且不等 → 判为不同季，直接 0（这是「第一季点进去第二季」的主因）。
  * 片名核心名相等才给高分；单纯包含（一方是另一方子串）只给低分，避免「越狱兔」被
@@ -156,6 +183,7 @@ fun anchorMatchScore(anchor: MatchAnchor, item: VodItem): Int {
         .ifBlank { return 0 }
     val b = coreNameOf(item.title)
     if (b.isEmpty()) return 0
+    if (isDerivativeOf(anchor.title, item.title)) return 0
 
     // 年份硬否决：采集站 year 常是「2024」或「2024-01-01」，取前 4 位。
     val ay = anchor.year.takeFirst4Digit()
@@ -179,20 +207,6 @@ fun anchorMatchScore(anchor: MatchAnchor, item: VodItem): Int {
     val yearBonus = if (ay != null && ay == by) 1 else 0
     val seasonBonus = if (anchorSeason != null && anchorSeason == itemSeason) 1 else 0
     return nameScore + originalBonus + yearBonus + seasonBonus
-}
-
-/** 是否「强命中」：可立即进详情，无需再等其余源。要求核心名完全相等且无硬冲突。 */
-fun isStrongAnchorMatch(anchor: MatchAnchor, item: VodItem): Boolean {
-    val a = coreNameOf(anchor.title)
-    val b = coreNameOf(item.title)
-    if (a.isEmpty() || a != b) return false
-    val ay = anchor.year.takeFirst4Digit()
-    val by = item.year.takeFirst4Digit()
-    if (ay != null && by != null && kotlin.math.abs(ay - by) > 1) return false
-    val anchorSeason = anchor.season
-    val itemSeason = seasonNumberOf(item.title)
-    if (anchorSeason != null && itemSeason != null && anchorSeason != itemSeason) return false
-    return true
 }
 
 /** 取字符串里第一个 4 位年份（19xx / 20xx），拿不到返回 null。 */

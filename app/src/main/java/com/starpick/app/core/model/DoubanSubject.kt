@@ -37,6 +37,12 @@ data class MatchAnchor(
     /** 季号从片名解析；解析不出表示「不知第几季」，比对时不据此否决。 */
     val season: Int? = seasonNumberOf(title)
 
+    /**
+     * 拿去采集源搜索的词：剥掉季号 / 年份 / 方括号标注，正片名里的符号原样保留。
+     * 搜索用宽词、筛选靠 [anchorMatchScore] 的季号与年份否决，见 [searchNameOf]。
+     */
+    val searchKeyword: String get() = searchNameOf(title)
+
     companion object {
         fun from(subject: DoubanSubject) = MatchAnchor(
             title = subject.title,
