@@ -60,12 +60,14 @@ import coil3.request.crossfade
 import com.starpick.app.AppContainer
 import com.starpick.app.core.model.DoubanDetail
 import com.starpick.app.core.model.MatchAnchor
+import com.starpick.app.core.model.MediaTag
 import com.starpick.app.core.model.SearchGroup
 import com.starpick.app.core.model.VodItem
 import com.starpick.app.core.model.WatchProgress
 import com.starpick.app.core.model.historyKeyOf
 import com.starpick.app.core.parser.PlaylistParser
 import com.starpick.app.core.search.pickGroup
+import com.starpick.app.core.search.match.MatchTrace
 import com.starpick.app.ui.component.EmptyState
 import com.starpick.app.ui.component.EpisodeCell
 import com.starpick.app.ui.component.FlowPosterGrid
@@ -183,7 +185,7 @@ fun DetailScreen(
     // 后台按锚点补齐视频源。两种情况走这里：入口是豆瓣条目（占位组），或入口只有一条历史记录。
     // 搜索词用 anchor.searchKeyword —— 剥掉季号 / 年份 / 方括号，但保留「·」这类符号。
     // 采集站是子串匹配，搜「某某 第一季」在片名写作「某某」的站上必然 0 结果；
-    // 反过来搜「某某」在两种写法下都命中，命中面只增不减。季号筛选交给 anchorMatchScore。
+    // 反过来搜「某某」在两种写法下都命中，命中面只增不减。季号筛选交给匹配管线的季号规则。
     LaunchedEffect(enrichAnchor) {
         val anchor = enrichAnchor ?: return@LaunchedEffect
         val enabled = container.store.sources.value.filter { it.enabled }
@@ -191,31 +193,38 @@ fun DetailScreen(
             enriching = false
             return@LaunchedEffect
         }
-        val outcome = withContext(Dispatchers.IO) {
-            container.aggregator.groupedWithVariants(
-                sites = enabled,
-                keyword = anchor.searchKeyword,
-                // 豆瓣用译名、采集站用原名时，只靠译名永远搜不出结果。
-                aliases = listOf(anchor.originalTitle),
-                // 这条路径用户没有「换个词重搜」的手段，对沉默的源也要尽力找齐。
-                fillSilentSources = true,
-            )
-        }
-        val target = pickGroup(outcome.groups.orEmpty(), anchor)
-        // 占位条目必须被整体替换（哪怕只有 1 个源）；真实源之间才用「更多源」判断，
-        // 且只在没播放时更新选中项，避免打断播放、重置进度。
-        if (target != null && (!hasRealSource || target.items.size > items.size)) {
-            items = target.items
-            if (playing == null) {
-                val current = target.items.firstOrNull { it.key == selected.key }
-                val next = current ?: target.items.first()
-                if (next != selected) {
-                    selected = next
-                    resolved = next
+        MatchTrace.begin("匹配《${anchor.title}》")
+        MatchTrace.anchor(anchor)
+        try {
+            val outcome = withContext(Dispatchers.IO) {
+                container.aggregator.groupedWithVariants(
+                    sites = enabled,
+                    keyword = anchor.searchKeyword,
+                    // 豆瓣用译名、采集站用原名时，只靠译名永远搜不出结果。
+                    aliases = listOf(anchor.originalTitle),
+                    // 这条路径用户没有「换个词重搜」的手段，对沉默的源也要尽力找齐。
+                    fillSilentSources = true,
+                )
+            }
+            val target = pickGroup(outcome.groups.orEmpty(), anchor)
+            // 占位条目必须被整体替换（哪怕只有 1 个源）；真实源之间才用「更多源」判断，
+            // 且只在没播放时更新选中项，避免打断播放、重置进度。
+            if (target != null && (!hasRealSource || target.items.size > items.size)) {
+                items = target.items
+                if (playing == null) {
+                    val current = target.items.firstOrNull { it.key == selected.key }
+                    val next = current ?: target.items.first()
+                    if (next != selected) {
+                        selected = next
+                        resolved = next
+                    }
                 }
             }
+            MatchTrace.result(items.count { it.sourceId.isNotBlank() })
+        } finally {
+            MatchTrace.end()
+            enriching = false
         }
-        enriching = false
     }
 
     // 搜索结果里有些源不给播放串，换源或取详情时补一次。
@@ -507,7 +516,11 @@ fun DetailScreen(
                         ) {
                             items.forEach { item ->
                                 LineChip(
-                                    text = item.sourceName,
+                                    // 同一部片在一个源里可能有粤语 / 国语 / 英文多条，
+                                    // 只显示源名会变成三个一模一样的按钮，用户没法选。
+                                    text = MediaTag.of(item.title)
+                                        ?.let { "${item.sourceName} · $it" }
+                                        ?: item.sourceName,
                                     selected = item.key == selected.key,
                                     onClick = {
                                         // 点源只做「选中」：更新线路 / 选集列表，不打断当前播放。

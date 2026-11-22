@@ -44,6 +44,7 @@ import com.starpick.app.ui.screen.DiscoverScreen
 import com.starpick.app.ui.screen.DiscoverUiState
 import com.starpick.app.ui.screen.HomeScreen
 import com.starpick.app.ui.screen.HomeUiState
+import com.starpick.app.ui.screen.MatchLogScreen
 import com.starpick.app.ui.screen.SearchScreen
 import com.starpick.app.ui.screen.SearchUiState
 import com.starpick.app.ui.screen.SettingsScreen
@@ -69,6 +70,11 @@ sealed interface Screen {
      * 用「全部 / 豆瓣 / 视频源」三个 tab 分维度看。
      */
     data object Search : Screen
+
+    /**
+     * 匹配诊断日志。低频且只用于排查，收在设置二级页，不进一级页面。
+     */
+    data object MatchLog : Screen
 
     /**
      * [enrichAnchor] 非空时，详情页会按这个锚点在后台补齐其余源。
@@ -188,6 +194,8 @@ fun StarpickNav(container: AppContainer) {
             onBack = pop,
         )
 
+        is Screen.MatchLog -> MatchLogScreen(onBack = pop)
+
         else -> {
             Scaffold(
                 // 顶部 inset 不再由 Scaffold 统一给：首页 Hero 要顶到状态栏下，
@@ -251,6 +259,7 @@ fun StarpickNav(container: AppContainer) {
                             container = container,
                             health = sourceHealthState,
                             onOpenSources = { stack.add(Screen.Sources) },
+                            onOpenMatchLog = { stack.add(Screen.MatchLog) },
                         )
                     }
                 }

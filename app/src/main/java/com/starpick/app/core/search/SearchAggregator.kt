@@ -5,6 +5,7 @@ import com.starpick.app.core.model.SearchGroup
 import com.starpick.app.core.model.SourceSite
 import com.starpick.app.core.model.VodItem
 import com.starpick.app.core.parser.PlaylistParser
+import com.starpick.app.core.search.match.MatchTrace
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.Flow
@@ -40,6 +41,14 @@ class SearchAggregator(private val api: CmsV10Api) {
             }
         }
         val finished = jobs.awaitAll()
+        finished.forEach { (site, result) ->
+            MatchTrace.source(
+                siteName = site.name,
+                word = keyword,
+                count = result.getOrDefault(emptyList()).size,
+                failed = result.isFailure,
+            )
+        }
         SearchOutcome(
             items = finished.flatMap { (_, result) -> result.getOrDefault(emptyList()) },
             failedSources = finished.mapNotNull { (site, result) ->
@@ -77,42 +86,53 @@ class SearchAggregator(private val api: CmsV10Api) {
         page: Int = 1,
         aliases: List<String> = emptyList(),
         fillSilentSources: Boolean = false,
-    ): SearchOutcome = supervisorScope {
-        val first = search(sites, keyword, page)
-        if (page > 1) return@supervisorScope toOutcome(first)
+    ): SearchOutcome {
+        MatchTrace.begin("搜索「$keyword」第 $page 页")
+        return try {
+            supervisorScope {
+                val first = search(sites, keyword, page)
+                if (page > 1) return@supervisorScope toOutcome(first)
 
-        // 手动搜索：原词已经有结果就收工。
-        if (!fillSilentSources && first.items.isNotEmpty()) return@supervisorScope toOutcome(first)
+                // 手动搜索：原词已经有结果就收工。
+                if (!fillSilentSources && first.items.isNotEmpty()) {
+                    return@supervisorScope toOutcome(first)
+                }
 
-        // 只对没返回结果的源补搜：已命中的源不再打扰，既不浪费请求，
-        // 也不会把已经拿到的结果换成一个写法变体下的近似条目。
-        val targets = if (fillSilentSources) {
-            val answered = first.items.map { it.sourceId }.toSet()
-            sites.filter { it.enabled && it.id !in answered }
-        } else {
-            sites
-        }
-        if (targets.isEmpty()) return@supervisorScope toOutcome(first)
+                // 只对没返回结果的源补搜：已命中的源不再打扰，既不浪费请求，
+                // 也不会把已经拿到的结果换成一个写法变体下的近似条目。
+                val targets = if (fillSilentSources) {
+                    val answered = first.items.map { it.sourceId }.toSet()
+                    sites.filter { it.enabled && it.id !in answered }
+                } else {
+                    sites
+                }
+                if (targets.isEmpty()) return@supervisorScope toOutcome(first)
 
-        val variants = SearchTerms.variants(keyword, aliases).drop(1) // 第 1 个是原词，已搜过
-        if (variants.isEmpty()) return@supervisorScope toOutcome(first)
+                val variants = SearchTerms.variants(keyword, aliases).drop(1) // 第 1 个是原词，已搜过
+                if (variants.isEmpty()) return@supervisorScope toOutcome(first)
+                MatchTrace.keywords(keyword, variants)
 
-        // 每个变体都对目标源搜一轮；变体之间并发，单源超时由 search() 内部兜住。
-        val rounds = variants.map { variant ->
-            async {
-                runCatching { withTimeout(PER_SOURCE_TIMEOUT_MS) { search(targets, variant, page) } }
-                    .getOrDefault(SearchOutcome())
+                // 每个变体都对目标源搜一轮；变体之间并发，单源超时由 search() 内部兜住。
+                val rounds = variants.map { variant ->
+                    async {
+                        runCatching {
+                            withTimeout(PER_SOURCE_TIMEOUT_MS) { search(targets, variant, page) }
+                        }.getOrDefault(SearchOutcome())
+                    }
+                }.awaitAll()
+
+                val items = mutableListOf<VodItem>()
+                val seen = HashSet<String>()
+                val failed = LinkedHashSet(first.failedSources)
+                (listOf(first) + rounds).forEach { outcome ->
+                    outcome.items.forEach { if (seen.add(it.key)) items += it }
+                    failed.addAll(outcome.failedSources)
+                }
+                toOutcome(SearchOutcome(items, failedSources = failed.toList()))
             }
-        }.awaitAll()
-
-        val items = mutableListOf<VodItem>()
-        val seen = HashSet<String>()
-        val failed = LinkedHashSet(first.failedSources)
-        (listOf(first) + rounds).forEach { outcome ->
-            outcome.items.forEach { if (seen.add(it.key)) items += it }
-            failed.addAll(outcome.failedSources)
+        } finally {
+            MatchTrace.end()
         }
-        toOutcome(SearchOutcome(items, failedSources = failed.toList()))
     }
 
     /**

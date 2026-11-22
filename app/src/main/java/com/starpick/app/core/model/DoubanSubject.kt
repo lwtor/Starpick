@@ -39,7 +39,7 @@ data class MatchAnchor(
 
     /**
      * 拿去采集源搜索的词：剥掉季号 / 年份 / 方括号标注，正片名里的符号原样保留。
-     * 搜索用宽词、筛选靠 [anchorMatchScore] 的季号与年份否决，见 [searchNameOf]。
+     * 搜索用宽词、筛选靠匹配管线的季号与年份否决，见 [searchNameOf]。
      */
     val searchKeyword: String get() = searchNameOf(title)
 

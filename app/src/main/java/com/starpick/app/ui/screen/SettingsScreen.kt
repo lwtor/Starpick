@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.OpenInBrowser
@@ -79,6 +80,7 @@ fun SettingsScreen(
     container: AppContainer,
     health: SourceHealthUiState,
     onOpenSources: () -> Unit,
+    onOpenMatchLog: () -> Unit,
 ) {
     val sources by container.store.sources.collectAsState()
     val enabledCount = sources.count { it.enabled }
@@ -106,6 +108,10 @@ fun SettingsScreen(
 
         item { SettingsSectionHeader(title = "播放与存储", topPadding = 26.dp) }
         item { CacheCard(container) }
+        item {
+            Spacer(Modifier.height(10.dp))
+            MatchLogEntryCard(onClick = onOpenMatchLog)
+        }
 
         item { SettingsSectionHeader(title = "关于", topPadding = 26.dp) }
         item { UpdatePanel(container) }
@@ -223,6 +229,60 @@ private fun SourcesEntryCard(
 }
 
 // ---------------------------------------------------------------- 播放与存储
+
+/**
+ * 匹配诊断入口。
+ *
+ * 它不是配置项，而是排查工具：用户遇到「点 A 进 B」或「搜不到」时，
+ * 进来复制一段文本发出来，比截图和口述准确得多。所以放在播放分区末尾，
+ * 不占一级页面的注意力，但也不藏到「关于」里。
+ */
+@Composable
+private fun MatchLogEntryCard(onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .settingsCard()
+            .clickable(onClick = onClick)
+            .padding(start = 16.dp, end = 10.dp, top = 14.dp, bottom = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = Icons.Filled.BugReport,
+            contentDescription = null,
+            tint = Ink.Text2,
+            modifier = Modifier.size(18.dp),
+        )
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = "匹配诊断",
+                style = MaterialTheme.typography.titleSmall.copy(fontSize = 15.sp),
+                color = Ink.Text1,
+            )
+            Spacer(Modifier.height(3.dp))
+            Text(
+                text = "记录最近 8 次匹配的完整过程，可复制反馈",
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+                color = Ink.Text3,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.width(10.dp))
+        Text(
+            text = "查看",
+            style = MaterialTheme.typography.labelMedium,
+            color = Accent.Brand,
+        )
+        Spacer(Modifier.width(2.dp))
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = null,
+            tint = Ink.Text3,
+            modifier = Modifier.size(18.dp),
+        )
+    }
+}
 
 /**
  * 缓存卡：数字 + 占用条 + 一个动作。

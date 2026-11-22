@@ -59,6 +59,18 @@ fun contentKeyOf(title: String): String {
 }
 
 /**
+ * 分组键：同一部片的不同发行版本（粤语 / 国语 / 英文 / 4K）归到一组。
+ *
+ * 和 [contentKeyOf] 分开是因为两者的粒度要求恰好相反：
+ *  - **分组**要合并：「沙丘[粤语]」「沙丘[国语]」必须是同一张卡片、同一个源列表，
+ *    否则用户在每个入口只看得见一个版本；
+ *  - **观看历史**要分开：换语言重看，进度不能互相覆盖。
+ *
+ * 所以分组键剔除版本标注，历史键（[historyKeyOf]）保留。
+ */
+fun groupKeyOf(title: String): String = contentKeyOf(MediaTag.strip(title))
+
+/**
  * 观看历史的内容键。
  *
  * 比 [contentKeyOf] 更宽松：搜索分组必须把「第1集 / 第2集」当成不同条目，
@@ -124,7 +136,9 @@ fun coreNameOf(title: String): String {
     var s = title.lowercase().replace(TITLE_BRACKET, "")
     s = s.replace(SEASON_WORD, "").replace(TITLE_YEAR, "").replace(TITLE_NOISE, "")
     repeat(2) { s = s.replace(EPISODE_TAIL, "") }
-    return s
+    // 整名片名就是年份的情况（《2046》《1917》《2012》）删完为空，回退到只去噪点的结果。
+    // 不回退的话这些片的锚点核心名恒为空，跨源匹配永远判「片名为空」，一条源都命中不了。
+    return s.ifBlank { title.lowercase().replace(TITLE_NOISE, "") }
 }
 
 /**
@@ -133,7 +147,7 @@ fun coreNameOf(title: String): String {
  * 采集站是 `vod_name` 子串匹配，搜成「某某 第一季」时，片名写作「某某」的站必然 0 结果
  * ——这是从豆瓣带季号的条目进来最容易踩的坑。反过来搜「某某」，片名写作「某某 第一季」
  * 的站仍然命中，因为短串是长串的子串。所以搜索词取宽的那个，筛选交给
- * [anchorMatchScore] 的季号 / 年份否决，是严格更优的：命中面只增不减。
+ * 匹配管线的季号 / 年份否决，是严格更优的：命中面只增不减。
  *
  * 刻意不动「·」「:」这类符号：采集站正片名常带它们，去掉就搜不到了。
  * 整个片名都是年份的情况（《2046》《1917》）剥完为空，回退原标题。
@@ -147,71 +161,6 @@ fun searchNameOf(title: String): String {
         .trim()
     return stripped.ifBlank { title.trim() }
 }
-
-// ------------------------------------------------ 跨源锚点匹配（豆瓣 → 采集源）
-
-/** 素材 / 衍生内容标注：与正片同源同名，但根本不是同一部片，不能当播放源。 */
-private val DERIVATIVE_TAG = Regex(
-    "解说|预告|花絮|速看|片段|彩蛋|特辑|混剪|影评|解析|盘点|reaction|trailer",
-    RegexOption.IGNORE_CASE,
-)
-
-/**
- * 候选名带衍生标注、而锚点不带 → 这是解说 / 预告片，不是用户在找的那部片。
- *
- * 这是 [coreNameOf] 的盲区：它会连方括号带内容整体删掉，「越狱兔[电影解说]」的核心名
- * 因此等于「越狱兔」，和正片拿到同一个 6 分，再被「同分取源多者」的规则选中——
- * 解说类内容往往比正片铺得更广，于是稳定抢走正片的位置。
- *
- * 「合集」刻意不算：某某合集通常就是正片全集，仍然可播。
- */
-private fun isDerivativeOf(expected: String, candidate: String): Boolean =
-    DERIVATIVE_TAG.containsMatchIn(candidate) && !DERIVATIVE_TAG.containsMatchIn(expected)
-
-/**
- * 锚点与采集源条目的匹配评分。越高越可能是同一部片，0 表示根本不是。
- *
- * 相比裸片名比对，多了年份与季号两个硬否决：
- *  - 衍生标注：候选是解说 / 预告时直接否决，见 [isDerivativeOf]。
- *  - 年份：两边都拿到且相差超过 1 年 → 判为不同作品（翻拍 / 同名），直接 0。
- *  - 季号：两边都明确且不等 → 判为不同季，直接 0（这是「第一季点进去第二季」的主因）。
- * 片名核心名相等才给高分；单纯包含（一方是另一方子串）只给低分，避免「越狱兔」被
- * 「越狱二人组」这类沾边条目抢走。原名命中作为额外加分。
- */
-fun anchorMatchScore(anchor: MatchAnchor, item: VodItem): Int {
-    val a = anchor.title.let { coreNameOf(it) }
-        .ifBlank { return 0 }
-    val b = coreNameOf(item.title)
-    if (b.isEmpty()) return 0
-    if (isDerivativeOf(anchor.title, item.title)) return 0
-
-    // 年份硬否决：采集站 year 常是「2024」或「2024-01-01」，取前 4 位。
-    val ay = anchor.year.takeFirst4Digit()
-    val by = item.year.takeFirst4Digit()
-    if (ay != null && by != null && kotlin.math.abs(ay - by) > 1) return 0
-
-    // 季号硬否决：仅当两边都解析出季号且不等时否决。
-    val anchorSeason = anchor.season
-    val itemSeason = seasonNumberOf(item.title)
-    if (anchorSeason != null && itemSeason != null && anchorSeason != itemSeason) return 0
-
-    val nameScore = when {
-        a == b -> 6
-        a in b || b in a -> 2
-        else -> return 0
-    }
-    // 原名（外文名 / 别名）命中：采集站常用原名，豆瓣用译名时靠这个救回。
-    val original = coreNameOf(anchor.originalTitle)
-    val originalBonus = if (original.length >= 2 && (original == b || original in b || b in original)) 2 else 0
-    // 年份一致（非否决的情况下）小加分，年代表达模糊时不强求。
-    val yearBonus = if (ay != null && ay == by) 1 else 0
-    val seasonBonus = if (anchorSeason != null && anchorSeason == itemSeason) 1 else 0
-    return nameScore + originalBonus + yearBonus + seasonBonus
-}
-
-/** 取字符串里第一个 4 位年份（19xx / 20xx），拿不到返回 null。 */
-private fun String.takeFirst4Digit(): Int? =
-    Regex("(?:19|20)[0-9]{2}").find(this)?.value?.toIntOrNull()
 
 data class Episode(val name: String, val url: String)
 

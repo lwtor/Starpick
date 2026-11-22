@@ -2,7 +2,7 @@ package com.starpick.app.core.parser
 
 import com.starpick.app.core.model.Episode
 import com.starpick.app.core.model.PlayGroup
-import com.starpick.app.core.model.contentKeyOf
+import com.starpick.app.core.model.groupKeyOf
 
 /**
  * 苹果 CMS V10 的播放串解析：
@@ -65,9 +65,11 @@ object PlaylistParser {
         return if (direct >= 0) direct else 0
     }
 
-    /** 聚合搜索时的标题归一：去掉空白、标点与常见分隔符。 */
-    /** 搜索结果的分组键，与观看历史的归并键保持一致。 */
-    fun normalizeTitle(title: String): String = contentKeyOf(title)
+    /**
+     * 搜索结果的分组键：多语言 / 多画质版本归到同一张卡片。
+     * 与观看历史的归并键刻意不同——历史要按版本分开记，否则换语言看会互相覆盖进度。
+     */
+    fun normalizeTitle(title: String): String = groupKeyOf(title)
 }
 
 /**
