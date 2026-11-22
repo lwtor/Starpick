@@ -67,8 +67,14 @@ fun contentKeyOf(title: String): String {
  *  - **观看历史**要分开：换语言重看，进度不能互相覆盖。
  *
  * 所以分组键剔除版本标注，历史键（[historyKeyOf]）保留。
+ *
+ * 两步都要走：`strip` 删括号里的（「沙丘[粤语]」），`stripSuffix` 删不带括号、
+ * 直接缀在片名后的（「少林足球粤语」）。少了后一步，「少林足球粤语」会自成一组——
+ * 核心名明明已经和「少林足球」一致（都是 7 分），却因为分组键不同而被 [pickGroup]
+ * 当成两个竞争者，最后只有一个组能进详情页，另一个组的源就凭空消失了。
  */
-fun groupKeyOf(title: String): String = contentKeyOf(MediaTag.strip(title))
+fun groupKeyOf(title: String): String =
+    contentKeyOf(MediaTag.stripSuffix(MediaTag.strip(title)))
 
 /**
  * 观看历史的内容键。
