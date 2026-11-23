@@ -761,7 +761,11 @@ fun DetailScreen(
                         val activeEpisode = when {
                             active != null && active.item.key == resolved.key && active.groupIndex == safeLineIndex ->
                                 active.episodeIndex
-                            record != null && record.groupIndex == safeLineIndex -> record.episodeIndex
+                            // 历史进度必须属于当前源：切到别的源时线路下标常相同，
+                            // 不校验 sourceId/vodId 会把旧集号亮到每个源上（多个黄框）。
+                            record != null && record.sourceId == resolved.sourceId &&
+                                record.vodId == resolved.vodId && record.groupIndex == safeLineIndex ->
+                                record.episodeIndex
                             else -> -1
                         }
                         FlowPosterGrid(
