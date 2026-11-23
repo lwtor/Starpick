@@ -66,11 +66,13 @@ import com.starpick.app.core.model.VodItem
 import com.starpick.app.core.model.WatchProgress
 import com.starpick.app.core.model.historyKeyOf
 import com.starpick.app.core.parser.PlaylistParser
+import com.starpick.app.core.search.SearchOutcome
 import com.starpick.app.core.search.pickGroup
 import com.starpick.app.core.search.match.MatchTrace
 import com.starpick.app.ui.component.EmptyState
 import com.starpick.app.ui.component.EpisodeCell
 import com.starpick.app.ui.component.FlowPosterGrid
+import com.starpick.app.ui.component.GhostButton
 import com.starpick.app.ui.component.LineChip
 import com.starpick.app.ui.component.PrimaryButton
 import com.starpick.app.ui.component.SectionHeader
@@ -99,10 +101,11 @@ import kotlinx.coroutines.withTimeoutOrNull
 private const val YEAR_LOOKUP_TIMEOUT_MS = 1_500L
 
 /**
- * 详情页补源最多翻几页。
+ * 详情页自动补源的页数上限。
  *
- * 采集站一页 20 条，常用词的第一页往往全是新上架的沾边内容，正片在两三页之后。
- * 翻到 3 页仍找不到，基本就是这些源确实没有这部片，再多翻只是拖时间。
+ * 采集站一页 20 条，常用词第一页常被新上架的沾边内容占满，正片在两三页之后。
+ * 自动翻到 3 页为止，剩下的交给用户点「加载更多源」——不替用户把几十页流量和等待一次性花掉。
+ * 源站声明的 pagecount 比这个数小的话，提前到底。
  */
 private const val MAX_DETAIL_SEARCH_PAGES = 3
 
@@ -154,6 +157,12 @@ fun DetailScreen(
     var enriching by remember(group) {
         mutableStateOf(enrichAnchor != null && group.items.all { it.sourceId.isBlank() })
     }
+    // 翻页状态：自动阶段翻满 3 页，之后由「加载更多源」按钮接着翻。
+    // collected 保留累计结果，否则每次手动翻页都要从第 1 页重新搜一遍。
+    var collected by remember(group) { mutableStateOf<SearchOutcome?>(null) }
+    var nextPage by remember(group) { mutableStateOf(1) }
+    var moreLoading by remember(group) { mutableStateOf(false) }
+    var moreExhausted by remember(group) { mutableStateOf(false) }
     // 播放只是本页顶部的一个状态切换，不动导航栈。
     var playing by remember(group) { mutableStateOf<PlayTarget?>(null) }
 
@@ -208,6 +217,25 @@ fun DetailScreen(
         }
     }
 
+    /**
+     * 把一次匹配结果应用到源列表。自动翻页和手动加载共用，保证「不打断播放」的判断只有一处。
+     * 占位条目（sourceId 空）会被真实源整体替换；已有真源时只在数量增加时更新。
+     */
+    fun applyFoundSources(target: SearchGroup?) {
+        val found = target?.items.orEmpty().filter { it.sourceId.isNotBlank() }
+        if (found.isEmpty()) return
+        val current = items
+        if (current.any { it.sourceId.isNotBlank() } && found.size <= current.size) return
+        items = found
+        if (playing == null) {
+            val keep = found.firstOrNull { it.key == selected.key } ?: found.first()
+            if (keep != selected) {
+                selected = keep
+                resolved = keep
+            }
+        }
+    }
+
     // 后台按锚点补齐视频源。两种情况走这里：入口是豆瓣条目（占位组），或入口只有一条历史记录。
     // 搜索词用 anchor.searchKeyword —— 剥掉季号 / 年份 / 方括号，但保留「·」这类符号。
     // 采集站是子串匹配，搜「某某 第一季」在片名写作「某某」的站上必然 0 结果；
@@ -241,48 +269,92 @@ fun DetailScreen(
                     fillSilentSources = true,
                 )
             }
-            var target = pickGroup(outcome.groups.orEmpty(), anchor)
+            collected = outcome
+            applyFoundSources(pickGroup(outcome.groups.orEmpty(), anchor))
+            MatchTrace.note(
+                "第 1 页: ${outcome.items.size} 条" +
+                    if (outcome.pageCount > 0) " / 源站共 ${outcome.pageCount} 页" else "",
+            )
 
-            // 第一页凑不出一组可信候选时继续往后翻。
-            // 采集站按更新时间倒序返回，「功夫」这类常用词的第一页常被新上架的赛事、
-            // 短剧占满（实测四个源各 20 条里没有一条是正片），正片排在几十条之后。
-            // 这不是匹配规则的问题——压根没搜到，规则再好也没用。
-            // 只在彻底没结果时翻页，正常路径零额外请求。
+            // 不再只在「完全没匹配上」时才翻：常用词第一页常常只有 1 个真源，
+            // 多翻两页能把散落在后面的语言版本补齐。源站页数比上限小就提前到底。
+            val ceiling = if (outcome.pageCount > 0) {
+                minOf(MAX_DETAIL_SEARCH_PAGES, outcome.pageCount)
+            } else {
+                MAX_DETAIL_SEARCH_PAGES
+            }
             var page = 1
-            while (target == null && page < MAX_DETAIL_SEARCH_PAGES) {
-                page++
-                val next = withContext(Dispatchers.IO) {
+            while (page < ceiling) {
+                val pageNo = page + 1
+                val more = withContext(Dispatchers.IO) {
                     container.aggregator.groupedWithVariants(
                         sites = enabled,
                         keyword = anchor.searchKeyword,
-                        page = page,
+                        page = pageNo,
                     )
                 }
-                if (next.items.isEmpty()) break
-                outcome = container.aggregator.merge(listOf(outcome, next))
-                // 合并后的组包含上一页的条目，这里不重复写候选明细，只留决策。
-                target = pickGroup(outcome.groups.orEmpty(), anchor, trace = false)
-            }
-            if (page > 1) {
-                MatchTrace.note("翻页: 第 1 页无可信候选，已翻到第 $page 页")
-            }
-            // 占位条目必须被整体替换（哪怕只有 1 个源）；真实源之间才用「更多源」判断，
-            // 且只在没播放时更新选中项，避免打断播放、重置进度。
-            if (target != null && (!hasRealSource || target.items.size > items.size)) {
-                items = target.items
-                if (playing == null) {
-                    val current = target.items.firstOrNull { it.key == selected.key }
-                    val next = current ?: target.items.first()
-                    if (next != selected) {
-                        selected = next
-                        resolved = next
-                    }
+                page = pageNo
+                if (more.items.isEmpty()) {
+                    moreExhausted = true
+                    MatchTrace.note("第 $page 页为空，提前到底")
+                    break
                 }
+                outcome = container.aggregator.merge(listOf(outcome, more))
+                collected = outcome
+                // 合并后的组包含前面页的条目，这里不重复写候选明细，只留决策。
+                applyFoundSources(pickGroup(outcome.groups.orEmpty(), anchor, trace = false))
+                MatchTrace.note("翻到第 $page 页: 本页 ${more.items.size} 条 / 累计 ${outcome.items.size} 条")
             }
+            nextPage = page + 1
+            if (outcome.pageCount > 0 && nextPage > outcome.pageCount) moreExhausted = true
+            MatchTrace.note(
+                "自动加载: 第 1~$page 页" +
+                    if (moreExhausted) "（已到底）" else "（可继续点「加载更多源」）",
+            )
             MatchTrace.result(items.count { it.sourceId.isNotBlank() })
         } finally {
             MatchTrace.end()
             enriching = false
+        }
+    }
+
+    /** 手动往后翻一页：从 [nextPage] 继续，不重搜前面几页，也不打扰正在播放的源。 */
+    fun loadMoreSources() {
+        val incoming = enrichAnchor ?: return
+        if (moreLoading || moreExhausted || enriching) return
+        val enabled = container.store.sources.value.filter { it.enabled }
+        if (enabled.isEmpty()) {
+            moreExhausted = true
+            return
+        }
+        moreLoading = true
+        scope.launch {
+            MatchTrace.begin("继续找《${incoming.title}》第 $nextPage 页")
+            try {
+                val page = withContext(Dispatchers.IO) {
+                    container.aggregator.groupedWithVariants(
+                        sites = enabled,
+                        keyword = incoming.searchKeyword,
+                        page = nextPage,
+                    )
+                }
+                if (page.items.isEmpty()) {
+                    moreExhausted = true
+                    MatchTrace.note("第 $nextPage 页为空，没有更多了")
+                } else {
+                    val merged = collected?.let { container.aggregator.merge(listOf(it, page)) } ?: page
+                    collected = merged
+                    val anchor = incoming.copy(year = incoming.year.ifBlank { douban?.year.orEmpty() })
+                    applyFoundSources(pickGroup(merged.groups.orEmpty(), anchor, trace = false))
+                    MatchTrace.note("第 $nextPage 页: ${page.items.size} 条 / 累计 ${merged.items.size} 条")
+                    nextPage++
+                    if (merged.pageCount > 0 && nextPage > merged.pageCount) moreExhausted = true
+                }
+                MatchTrace.result(items.count { it.sourceId.isNotBlank() })
+            } finally {
+                MatchTrace.end()
+                moreLoading = false
+            }
         }
     }
 
@@ -592,6 +664,36 @@ fun DetailScreen(
                     }
                     // 当前源的附加信息：线路数 / 集数 / 播放地址状态。
                     item { SourceInfoRow(item = resolved, groupCount = playGroups.size, episodeCount = episodes.size) }
+                }
+
+                // 只有豆瓣入口带可靠锚点（年份 / 原名 / 季号）时才能判断新条目是不是同一部片，
+                // 所以按钮只在这一条路径出现；普通搜索入口可回搜索页「加载更多」。
+                if (enrichAnchor != null && !enriching) {
+                    item {
+                        when {
+                            moreLoading -> Text(
+                                text = "正在加载更多源…",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = Ink.Text2,
+                                modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
+                            )
+
+                            moreExhausted -> Text(
+                                text = if (hasRealSource) "已加载全部结果 · 共 ${nextPage - 1} 页" else "没有更多了",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Ink.Text3,
+                                modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
+                            )
+
+                            else -> GhostButton(
+                                text = "加载更多源",
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 20.dp, vertical = 8.dp),
+                                onClick = ::loadMoreSources,
+                            )
+                        }
+                    }
                 }
 
                 if (playGroups.size > 1) {

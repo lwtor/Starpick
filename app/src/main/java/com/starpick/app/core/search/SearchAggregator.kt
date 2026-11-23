@@ -1,6 +1,7 @@
 package com.starpick.app.core.search
 
 import com.starpick.app.core.api.CmsV10Api
+import com.starpick.app.core.api.CmsPage
 import com.starpick.app.core.model.SearchGroup
 import com.starpick.app.core.model.SourceSite
 import com.starpick.app.core.model.VodItem
@@ -35,7 +36,7 @@ class SearchAggregator(private val api: CmsV10Api) {
         val jobs = sites.filter { it.enabled }.map { site ->
             async {
                 val result = runCatching {
-                    withTimeout(PER_SOURCE_TIMEOUT_MS) { api.search(site, keyword, page) }
+                    withTimeout(PER_SOURCE_TIMEOUT_MS) { api.searchPage(site, keyword, page) }
                 }
                 site to result
             }
@@ -45,15 +46,21 @@ class SearchAggregator(private val api: CmsV10Api) {
             MatchTrace.source(
                 siteName = site.name,
                 word = keyword,
-                count = result.getOrDefault(emptyList()).size,
+                count = result.getOrDefault(CmsPage()).items.size,
                 failed = result.isFailure,
+                pageCount = result.getOrDefault(CmsPage()).pageCount,
             )
         }
+        val pages = finished.map { (_, result) -> result.getOrDefault(CmsPage()) }
         SearchOutcome(
-            items = finished.flatMap { (_, result) -> result.getOrDefault(emptyList()) },
+            items = pages.flatMap { it.items },
             failedSources = finished.mapNotNull { (site, result) ->
                 site.name.takeIf { result.isFailure }
             },
+            // 多个源的「总页数」不同，取最大的那个作保守上界：
+            // 只要还有一个源可能有下一页，就允许继续翻；到底的源那一页自然返回空。
+            pageCount = pages.maxOfOrNull { it.pageCount } ?: 0,
+            total = pages.maxOfOrNull { it.total } ?: 0,
         )
     }
 
@@ -128,7 +135,14 @@ class SearchAggregator(private val api: CmsV10Api) {
                     outcome.items.forEach { if (seen.add(it.key)) items += it }
                     failed.addAll(outcome.failedSources)
                 }
-                toOutcome(SearchOutcome(items, failedSources = failed.toList()))
+                toOutcome(
+                    SearchOutcome(
+                        items = items,
+                        failedSources = failed.toList(),
+                        pageCount = first.pageCount,
+                        total = first.total,
+                    ),
+                )
             }
         } finally {
             MatchTrace.end()
@@ -145,6 +159,8 @@ class SearchAggregator(private val api: CmsV10Api) {
             SearchOutcome(
                 items = items,
                 failedSources = outcomes.flatMap { it.failedSources }.distinct(),
+                pageCount = outcomes.maxOfOrNull { it.pageCount } ?: 0,
+                total = outcomes.maxOfOrNull { it.total } ?: 0,
             ),
         )
     }
@@ -198,4 +214,8 @@ data class SearchOutcome(
     val items: List<VodItem> = emptyList(),
     val groups: List<SearchGroup> = emptyList(),
     val failedSources: List<String> = emptyList(),
+    /** 源站声明的总页数，取所有源里最大的；0 表示都不知道。 */
+    val pageCount: Int = 0,
+    /** 源站声明的总条数，用于日志判断「是不是压根没搜到」。 */
+    val total: Int = 0,
 )

@@ -24,7 +24,14 @@ import kotlinx.serialization.json.jsonObject
  */
 class CmsV10Api(private val client: HttpClient) {
 
-    suspend fun search(site: SourceSite, keyword: String, page: Int = 1): List<VodItem> = fetch(
+    suspend fun search(site: SourceSite, keyword: String, page: Int = 1): List<VodItem> =
+        searchPage(site, keyword, page).items
+
+    /**
+     * 带分页信息的搜索。苹果 CMS 的响应里本来就有 `total` / `pagecount`，之前只取了 list，
+     * 导致上层只能靠「返回空」猜到底——空页夹在中间会误判，刚好凑整页又要多请求一次才知道。
+     */
+    suspend fun searchPage(site: SourceSite, keyword: String, page: Int = 1): CmsPage = fetch(
         site,
         mapOf(
             "ac" to "videolist",
@@ -37,7 +44,7 @@ class CmsV10Api(private val client: HttpClient) {
     suspend fun detail(site: SourceSite, vodId: String): VodItem? = fetch(
         site,
         mapOf("ac" to "detail", "ids" to vodId),
-    ).firstOrNull()
+    ).items.firstOrNull()
 
     /**
      * 源设置页的探活。
@@ -81,7 +88,7 @@ class CmsV10Api(private val client: HttpClient) {
         }
     }
 
-    private suspend fun fetch(site: SourceSite, params: Map<String, String>): List<VodItem> {
+    private suspend fun fetch(site: SourceSite, params: Map<String, String>): CmsPage {
         val response = try {
             client.get(endpoint(site.baseUrl)) {
                 url {
@@ -92,21 +99,35 @@ class CmsV10Api(private val client: HttpClient) {
             }
         } catch (error: Exception) {
             // 源站超时/断连/证书异常等一律当作无结果，绝不让网络异常把上层带崩。
-            return emptyList()
+            return CmsPage()
         }
-        if (response.status.value !in 200..299) return emptyList()
+        if (response.status.value !in 200..299) return CmsPage()
 
         val body = response.bodyAsText()
         val root = runCatching { Json.parseToJsonElement(body).jsonObject }.getOrNull()
-            ?: return emptyList()
+            ?: return CmsPage()
         val array = root["list"] as? JsonArray
             ?: root["data"] as? JsonArray
-            ?: return emptyList()
+            ?: return CmsPage()
 
-        return array.mapNotNull { element ->
-            val obj = element as? JsonObject ?: return@mapNotNull null
-            parseItem(obj, site)
+        return CmsPage(
+            items = array.mapNotNull { element ->
+                val obj = element as? JsonObject ?: return@mapNotNull null
+                parseItem(obj, site)
+            },
+            total = root.int("total", "count"),
+            pageCount = root.int("pagecount", "page_count", "pagecnt"),
+        )
+    }
+
+    private fun JsonObject.int(vararg names: String): Int {
+        for (name in names) {
+            val raw = get(name).asText().trim()
+            // 少数改版源站会回 2.0 这样的浮点数，先按整数读再退到浮点。
+            val value = raw.toIntOrNull() ?: raw.toDoubleOrNull()?.toInt()
+            if (value != null && value >= 0) return value
         }
+        return 0
     }
 
     private fun parseItem(obj: JsonObject, site: SourceSite): VodItem? {
@@ -170,6 +191,13 @@ class CmsV10Api(private val client: HttpClient) {
         private const val PING_TIMEOUT_MS = 12_000L
     }
 }
+
+/** 一页采集站结果，附带源站自己声明的总条数 / 总页数（0 表示源站没给）。 */
+data class CmsPage(
+    val items: List<VodItem> = emptyList(),
+    val total: Int = 0,
+    val pageCount: Int = 0,
+)
 
 /**
  * 采集源的健康状态。

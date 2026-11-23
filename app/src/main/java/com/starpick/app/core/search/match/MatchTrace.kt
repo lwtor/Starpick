@@ -90,7 +90,7 @@ object MatchTrace {
     }
 
     /** 记录单个源的返回情况。 */
-    fun source(siteName: String, word: String, count: Int, failed: Boolean) {
+    fun source(siteName: String, word: String, count: Int, failed: Boolean, pageCount: Int = 0) {
         synchronized(lock) {
             if (depth == 0) return
             val tail = when {
@@ -98,7 +98,8 @@ object MatchTrace {
                 count == 0 -> "0 条"
                 else -> "$count 条"
             }
-            append("[$siteName] 「$word」→ $tail")
+            val pages = if (pageCount > 0) "（共 $pageCount 页）" else ""
+            append("[$siteName] 「$word」→ $tail$pages")
         }
     }
 
