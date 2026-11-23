@@ -237,13 +237,15 @@ fun DetailScreen(
         val current = items
         if (current.any { it.sourceId.isNotBlank() } && found.size <= current.size) return
         items = found
-        if (playing == null) {
-            val keep = found.firstOrNull { it.key == selected.key } ?: found.first()
-            if (keep != selected) {
-                selected = keep
-                resolved = keep
-            }
-        }
+        // selected / resolved 必须始终指向 items 里的某一条，否则视频源胶囊一条都不亮。
+        // 从「继续观看」进入时 playing 已有值，旧逻辑跳过修正，selected 仍停在占位项上，
+        // 而占位项的 key 已被真实源替换，item.key == selected.key 对任何胶囊都不成立。
+        // 优先对齐正在播放的源，其次保留原选中，最后退回第一条；这里只改选中态，不打断播放。
+        val keep = found.firstOrNull { it.key == playing?.item?.key }
+            ?: found.firstOrNull { it.key == selected.key }
+            ?: found.first()
+        if (keep != selected) selected = keep
+        if (keep != resolved) resolved = keep
     }
 
     // 后台按锚点补齐视频源。两种情况走这里：入口是豆瓣条目（占位组），或入口只有一条历史记录。
@@ -403,7 +405,10 @@ fun DetailScreen(
     val playGroups = remember(resolved) {
         PlaylistParser.parse(resolved.playFrom, resolved.playUrl)
     }
-    val episodes = playGroups.getOrNull(lineIndex)?.episodes.orEmpty()
+    // lineIndex 由异步补源 / 换源写入，可能与当前 resolved 的线路数不一致；
+    // 渲染与取集统一收敛，保证「有线路时恰好一条高亮」，也不会因越界出现空选集。
+    val safeLineIndex = lineIndex.coerceIn(0, (playGroups.size - 1).coerceAtLeast(0))
+    val episodes = playGroups.getOrNull(safeLineIndex)?.episodes.orEmpty()
 
     /**
      * 用记录里的线路/集号在当前源上开播。
@@ -725,7 +730,7 @@ fun DetailScreen(
                             playGroups.forEachIndexed { index, playGroup ->
                                 LineChip(
                                     text = playGroup.from,
-                                    selected = index == lineIndex,
+                                    selected = index == safeLineIndex,
                                     onClick = {
                                         // 线路同视频源：只切换选集列表，点集才切播放地址。
                                         lineIndex = index
@@ -754,9 +759,9 @@ fun DetailScreen(
                         val record = resumeRecord
                         val active = playing
                         val activeEpisode = when {
-                            active != null && active.item.key == resolved.key && active.groupIndex == lineIndex ->
+                            active != null && active.item.key == resolved.key && active.groupIndex == safeLineIndex ->
                                 active.episodeIndex
-                            record != null && record.groupIndex == lineIndex -> record.episodeIndex
+                            record != null && record.groupIndex == safeLineIndex -> record.episodeIndex
                             else -> -1
                         }
                         FlowPosterGrid(
@@ -774,9 +779,9 @@ fun DetailScreen(
                                 onClick = {
                                     val active = playing
                                     if (active != null && active.item.key == resolved.key) {
-                                        playing = active.copy(groupIndex = lineIndex, episodeIndex = index)
+                                        playing = active.copy(groupIndex = safeLineIndex, episodeIndex = index)
                                     } else {
-                                        playing = PlayTarget(resolved, lineIndex, index)
+                                        playing = PlayTarget(resolved, safeLineIndex, index)
                                     }
                                 },
                             )
