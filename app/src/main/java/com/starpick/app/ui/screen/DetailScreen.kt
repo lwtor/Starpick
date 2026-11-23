@@ -109,6 +109,14 @@ private const val YEAR_LOOKUP_TIMEOUT_MS = 1_500L
  */
 private const val MAX_DETAIL_SEARCH_PAGES = 3
 
+/**
+ * 历史源落在后面分页时，为把它找回来额外翻页的上限。
+ *
+ * 「继续观看」进来时手里只有一条记录，用户的上次源常在两三页之后。
+ * 自动阶段若 3 页没找到，继续翻到这里为止；一旦找到就停，不把几十页流量一次性花掉。
+ */
+private const val MAX_PREFERRED_SEARCH_PAGES = 6
+
 @Composable
 fun DetailScreen(
     container: AppContainer,
@@ -142,9 +150,23 @@ fun DetailScreen(
         return
     }
 
+    // 用户上次实际播放的源。搜索页进来没有记录时为 null，此时退回默认第一个。
+    // 用它而不是 group.items.first() 定位胶囊，才能做到「上次选中的那个圆亮着」。
+    val progressRecords by container.store.progress.collectAsState()
+    val preferredKey = remember(group, initialPlay, progressRecords) {
+        val record = initialPlay
+            ?: progressRecords.firstOrNull { it.key == historyKeyOf(group.title) }
+        record?.takeIf { it.sourceId.isNotBlank() && it.vodId.isNotBlank() }
+            ?.let { "${it.sourceId}:${it.vodId}" }
+    }
+    // 用户一旦手动点过源 / 换过源，后台补源就不能再把选择抢回「上次播放的源」。
+    var userPicked by remember(group) { mutableStateOf(false) }
+
     // 源列表独立成一个可变状态：后台补齐时只换这一份，不动 selected / playing 等，
     // 正在播放或已选好线路不会被重置。
-    var items by remember(group) { mutableStateOf(group.items) }
+    // distinctBy 必须在入口就做：搜索页传来的 group.items 可能含同 key 的重复条目，
+    // 不去重的话多个胶囊同时满足 `item.key == selected.key`，看起来就是「多个圆一起亮」。
+    var items by remember(group) { mutableStateOf(group.items.distinctBy { it.key }) }
     var selected by remember(group) { mutableStateOf(group.items.first()) }
     var resolved by remember(group) { mutableStateOf(group.items.first()) }
     var favorite by remember(group) { mutableStateOf(false) }
@@ -231,12 +253,21 @@ fun DetailScreen(
      */
     fun applyFoundSources(target: SearchGroup?) {
         val found = target?.items.orEmpty().filter { it.sourceId.isNotBlank() }
+            .distinctBy { it.key }
         if (found.isEmpty()) return
         val current = items
-        if (current.any { it.sourceId.isNotBlank() } && found.size <= current.size) return
+        // 数量没增加一般直接跳过，避免翻页重复触发；但「历史源已经补到、却还没选中」
+        // 是例外——从搜索页进来时 group 自带一条真源，第一页数量不变也得把它切过去。
+        val needPreferred = preferredKey != null && selected.key != preferredKey &&
+            found.any { it.key == preferredKey }
+        if (current.any { it.sourceId.isNotBlank() } && found.size <= current.size && !needPreferred) return
         items = found
-        if (playing == null) {
-            val keep = found.firstOrNull { it.key == selected.key } ?: found.first()
+        if (playing == null && !userPicked) {
+            // 上次播的源优先：它可能在第 2/3 页才补进来，一旦出现就切过去并选中，
+            // 而不是停在「第一个可用」的那个圆上。没有历史记录时才退回当前/第一个。
+            val keep = found.firstOrNull { it.key == preferredKey }
+                ?: found.firstOrNull { it.key == selected.key }
+                ?: found.first()
             if (keep != selected) {
                 selected = keep
                 resolved = keep
@@ -286,11 +317,16 @@ fun DetailScreen(
 
             // 不再只在「完全没匹配上」时才翻：常用词第一页常常只有 1 个真源，
             // 多翻两页能把散落在后面的语言版本补齐。源站页数比上限小就提前到底。
-            val ceiling = if (outcome.pageCount > 0) {
+            // 若上次播的源还没在这几页里出现，破例多翻几页把它找回来——这正是
+            // 「上次选中的圆在后面分页、一进来却选中第一个」的根因。
+            val normalCeiling = if (outcome.pageCount > 0) {
                 minOf(MAX_DETAIL_SEARCH_PAGES, outcome.pageCount)
             } else {
                 MAX_DETAIL_SEARCH_PAGES
             }
+            val siteCeiling = outcome.pageCount.takeIf { it > 0 } ?: MAX_PREFERRED_SEARCH_PAGES
+            val preferredMissing = preferredKey != null && items.none { it.key == preferredKey }
+            val ceiling = if (preferredMissing) minOf(MAX_PREFERRED_SEARCH_PAGES, siteCeiling) else normalCeiling
             var page = 1
             while (page < ceiling) {
                 val pageNo = page + 1
@@ -312,6 +348,11 @@ fun DetailScreen(
                 // 合并后的组包含前面页的条目，这里不重复写候选明细，只留决策。
                 applyFoundSources(pickGroup(outcome.groups.orEmpty(), anchor, trace = false))
                 MatchTrace.note("翻到第 $page 页: 本页 ${more.items.size} 条 / 累计 ${outcome.items.size} 条")
+                // 历史源已经找回就停，不为「多补几个版本」继续花流量。
+                if (preferredKey != null && items.any { it.key == preferredKey }) {
+                    MatchTrace.note("已在上次播放的源，停止额外翻页")
+                    break
+                }
             }
             nextPage = page + 1
             if (outcome.pageCount > 0 && nextPage > outcome.pageCount) moreExhausted = true
@@ -450,6 +491,7 @@ fun DetailScreen(
         if (active != null && items.size > 1) {
             val index = items.indexOfFirst { it.key == active.item.key }
             val next = items[(index + 1).mod(items.size)]
+            userPicked = true
             selected = next
             resolved = next
             val lines = PlaylistParser.parse(next.playFrom, next.playUrl)
@@ -664,6 +706,7 @@ fun DetailScreen(
                                     onClick = {
                                         // 点源只做「选中」：更新线路 / 选集列表，不打断当前播放。
                                         // 真正切源发生在点某一集时，避免误碰一次源就把正在看的进度丢掉。
+                                        userPicked = true
                                         selected = item
                                     },
                                 )
