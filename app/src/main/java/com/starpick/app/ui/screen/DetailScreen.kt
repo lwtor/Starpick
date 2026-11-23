@@ -792,14 +792,15 @@ fun DetailScreen(
                             modifier = Modifier.padding(horizontal = 20.dp),
                         )
                     } else {
-                        val record = resumeRecord
+                        // 高光只认「当前正在播放的那一集」，唯一且不会跳到历史集。
+                        // 旧逻辑在 playing / resumeRecord 之间 fallback，还要求
+                        // groupIndex == lineIndex；补源会重算 lineIndex，条件忽真忽假，
+                        // 高光就跑到历史记录那一集去了，看起来像「多个/错位选中」。
                         val active = playing
-                        val activeEpisode = when {
-                            active != null && active.item.key == resolved.key && active.groupIndex == lineIndex ->
-                                active.episodeIndex
-                            record != null && record.groupIndex == lineIndex -> record.episodeIndex
-                            else -> -1
-                        }
+                        val activeEpisode = if (
+                            active != null && active.item.key == resolved.key &&
+                            active.episodeIndex in episodes.indices
+                        ) active.episodeIndex else -1
                         FlowPosterGrid(
                             columns = 5,
                             itemCount = episodes.size,
