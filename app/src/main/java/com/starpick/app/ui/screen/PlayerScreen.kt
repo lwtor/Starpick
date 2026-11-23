@@ -200,11 +200,9 @@ fun PlayerSurface(
     var buffering by remember(currentUrl, reloadToken) { mutableStateOf(true) }
     // 每个播放地址只静默重试一次，避免坏地址无限重连。
     var autoRetried by remember(currentUrl) { mutableStateOf(false) }
-    // 自动兜底：同地址重试一次 → 换一条没试过的线路 → 换下一个源。
-    // 采集站经常「一条线路死、另一条活」，让用户自己去点换源太重了。
+    // 自动兜底只到「同地址重试一次 → 换一条没试过的线路」为止。
+    // 线路全失败就停在错误页，换源交给用户手动决定。
     val triedLines = remember(item.key) { mutableStateListOf<Int>() }
-    // 按内容归并（跨源同一部片）：避免 A→B→C→A 来回无限换源。
-    var sourceSwitched by remember(item.contentKey) { mutableStateOf(false) }
     var notice by remember(item.key) { mutableStateOf<String?>(null) }
     // 只要出过一帧画面就不再按「超时」判失败，慢源不该被误杀。
     var everReady by remember(currentUrl) { mutableStateOf(false) }
@@ -333,13 +331,9 @@ fun PlayerSurface(
                     onGroupChange(nextLine)
                     return
                 }
-                // 3) 同源所有线路都不行，再换下一个源，但每个内容只自动换一次。
-                if (!sourceSwitched && onSwitchSource != null) {
-                    sourceSwitched = true
-                    notice = "这个源播放失败，已自动换源"
-                    onSwitchSource()
-                    return
-                }
+                // 3) 同一源所有线路都失败：停在这里让用户手动点「换源」。
+                // 自动换源会把用户从选好的版本（粤语/国语）带走，而且失败原因常常是过期地址，
+                // 换源未必更好——手动切至少是用户自己决定的。
                 failure = describePlaybackError(error)
             }
         }
@@ -765,7 +759,6 @@ fun PlayerSurface(
                             autoRetried = false
                             notice = null
                             triedLines.clear()
-                            sourceSwitched = false
                             reloadToken++
                             onRefreshSource()
                         }
@@ -917,7 +910,6 @@ fun PlayerSurface(
                         label = "${index + 1}",
                         modifier = itemModifier,
                         selected = index == safeEpisode,
-                        seen = index < safeEpisode,
                         onClick = { playEpisode(index) },
                     )
                 }

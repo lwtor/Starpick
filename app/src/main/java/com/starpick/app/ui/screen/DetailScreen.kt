@@ -180,11 +180,19 @@ fun DetailScreen(
     // 「功夫熊猫」「功夫第一季」「石家庄功夫」几十条同名沾边条目一条都拦不住。
     // 查询词优先取锚点标题：那是豆瓣自己的片名，用它查到的年份才是这部片的年份。
     val doubanLookup = enrichAnchor?.title ?: group.title
-    val doubanGate = remember(group, doubanLookup) { CompletableDeferred<DoubanDetail?>() }
-    LaunchedEffect(doubanLookup) {
+    val doubanId = enrichAnchor?.doubanId.orEmpty()
+    val doubanGate = remember(group, doubanLookup, doubanId) { CompletableDeferred<DoubanDetail?>() }
+    LaunchedEffect(doubanLookup, doubanId) {
         doubanLoading = true
+        val anchor = enrichAnchor
         val detail = withContext(Dispatchers.IO) {
-            container.douban.detailByTitle(doubanLookup)
+            // 有豆瓣 id 就按 id 取：按片名 suggest 会把「功夫」兜底成《功夫女足》(2026)，
+            // 页面上的年份/评分跟着跳，用户以为串片。没有 id（视频源入口）才退回片名查。
+            if (anchor != null && anchor.doubanId.isNotBlank()) {
+                container.douban.detailById(anchor.doubanId, anchor.title, anchor.cover, anchor.year)
+            } else {
+                container.douban.detailByTitle(doubanLookup)
+            }
         }
         douban = detail
         doubanLoading = false
@@ -663,7 +671,14 @@ fun DetailScreen(
                         }
                     }
                     // 当前源的附加信息：线路数 / 集数 / 播放地址状态。
-                    item { SourceInfoRow(item = resolved, groupCount = playGroups.size, episodeCount = episodes.size) }
+                    item {
+                        SourceInfoRow(
+                            item = resolved,
+                            groupCount = playGroups.size,
+                            episodeCount = episodes.size,
+                            doubanYear = douban?.year.orEmpty(),
+                        )
+                    }
                 }
 
                 // 只有豆瓣入口带可靠锚点（年份 / 原名 / 季号）时才能判断新条目是不是同一部片，
@@ -753,7 +768,7 @@ fun DetailScreen(
                                 label = "${index + 1}",
                                 modifier = itemModifier,
                                 selected = activeEpisode == index,
-                                seen = activeEpisode > index,
+                                // 只标记最后播放的那一集；之前播过的不再铺成一片「已看过」的暗格子。
                                 onClick = {
                                     val active = playing
                                     if (active != null && active.item.key == resolved.key) {
@@ -992,7 +1007,11 @@ private fun InfoLine(label: String, value: String) {
 
 /** 当前源附加信息：线路数 / 集数 / 播放地址状态。 */
 @Composable
-private fun SourceInfoRow(item: VodItem, groupCount: Int, episodeCount: Int) {
+private fun SourceInfoRow(item: VodItem, groupCount: Int, episodeCount: Int, doubanYear: String = "") {
+    // 源站年份只在这里显示，不进顶部资料卡——同一部片在不同源上写的年份常常不同
+    // （《功夫》豆瓣 2004，源站写 2026 的更新年份），混在豆瓣信息里就变成「年份乱跳」。
+    val sourceYear = Regex("(?:19|20)[0-9]{2}").find(item.year)?.value.orEmpty()
+    val showYear = sourceYear.isNotBlank() && sourceYear != doubanYear
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1000,6 +1019,10 @@ private fun SourceInfoRow(item: VodItem, groupCount: Int, episodeCount: Int) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text("当前：${item.sourceName}", style = MaterialTheme.typography.labelMedium, color = Ink.Text1)
+        if (showYear) {
+            Spacer(Modifier.width(8.dp))
+            Text("源站 $sourceYear", style = MaterialTheme.typography.labelSmall, color = Ink.Text3)
+        }
         Spacer(Modifier.width(12.dp))
         Text("$groupCount 条线路", style = MaterialTheme.typography.labelSmall, color = Ink.Text3)
         Spacer(Modifier.width(10.dp))

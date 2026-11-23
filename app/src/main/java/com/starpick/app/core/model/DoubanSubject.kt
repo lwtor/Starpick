@@ -33,6 +33,10 @@ data class MatchAnchor(
     val title: String,
     val year: String = "",
     val originalTitle: String = "",
+    /** 豆瓣条目 id。有它就按 id 取详情，页面资料不会被同名条目的模糊匹配换掉。 */
+    val doubanId: String = "",
+    /** 豆瓣海报。subject_abstract 不返回封面，带过来给详情页用。 */
+    val cover: String = "",
 ) {
     /** 季号从片名解析；解析不出表示「不知第几季」，比对时不据此否决。 */
     val season: Int? = seasonNumberOf(title)
@@ -48,6 +52,8 @@ data class MatchAnchor(
             title = subject.title,
             year = subject.year,
             originalTitle = subject.originalTitle,
+            doubanId = subject.id,
+            cover = subject.cover,
         )
     }
 }

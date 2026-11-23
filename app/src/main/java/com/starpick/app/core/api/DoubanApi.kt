@@ -170,6 +170,27 @@ class DoubanApi(private val client: HttpClient) {
         }.getOrNull()
     }
 
+    /**
+     * 按已知豆瓣 id 取详情。从豆瓣榜/搜索点进来时 id 已经确定，绝不能再按片名 suggest 一遍——
+     * 「功夫」这种宽词会被 pickBest 兜底成《功夫女足》(2026)，页面年份和评分就跟着跳。
+     * 封面不在 subject_abstract 里，由锚点带过来；年份也以锚点为准，避免两条接口口径打架。
+     */
+    suspend fun detailById(id: String, title: String, cover: String, year: String): DoubanDetail? {
+        if (id.isBlank()) return null
+        return runCatching {
+            withTimeout(TIMEOUT_MS) {
+                fetchAbstract(id)?.let { detail ->
+                    detail.copy(
+                        id = id,
+                        title = title,
+                        cover = cover,
+                        year = year.ifBlank { detail.year },
+                    )
+                }
+            }
+        }.getOrNull()
+    }
+
     /** suggest 结果里挑最贴近查询片名的一条：完全同名 > 互相包含 > 第一条。 */
     private fun pickBest(candidates: List<DoubanSubject>, query: String): DoubanSubject? {
         if (candidates.isEmpty()) return null
